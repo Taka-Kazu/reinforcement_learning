@@ -7,7 +7,7 @@ import tensorflow as tf
 from collections import deque
 import os
 
-episodes = 1000
+episodes = 300
 steps = 200
 
 target_step = 195
@@ -21,9 +21,10 @@ class DQN:
   def __init__(self, state_dim, action_dim):
     self.action_dim = action_dim
     self.state_dim = state_dim
-    self.learning_rate = 0.01
+    self.hidden_dim = 32
+    self.learning_rate = 0.001
     self.minibatch_size = 32
-    self.replay_memory_size = 1000
+    self.replay_memory_size = 500
     self.gamma = 0.99 # 割引率
     self.memory = deque(maxlen = self.replay_memory_size)
     self.model_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
@@ -34,17 +35,19 @@ class DQN:
     # 入力層
     self.x = tf.placeholder(tf.float32, [None, self.state_dim])
     # 隠れ層
-    w_fc1 = tf.Variable(tf.truncated_normal([self.state_dim, 32], stddev=0.01))
-    b_fc1 = tf.Variable(tf.zeros([32]))
+    w_fc1 = tf.Variable(tf.truncated_normal([self.state_dim, self.hidden_dim], stddev=0.01))
+    b_fc1 = tf.Variable(tf.zeros([self.hidden_dim]))
     h_fc1 = tf.nn.relu(tf.matmul(self.x, w_fc1) + b_fc1)
     # 出力層
-    w_out = tf.Variable(tf.truncated_normal([32, self.action_dim], stddev=0.01))
+    w_out = tf.Variable(tf.truncated_normal([self.hidden_dim, self.action_dim], stddev=0.01))
     b_out = tf.Variable(tf.zeros([self.action_dim]))
-    self.y = tf.nn.softmax(tf.matmul(h_fc1, w_out) + b_out)
+    #self.y = tf.nn.softmax(tf.matmul(h_fc1, w_out) + b_out)
+    self.y = tf.matmul(h_fc1, w_out) + b_out
 
     # 学習用
     self.y_ = tf.placeholder(tf.float32, [None, self.action_dim])
-    self.loss = tf.reduce_mean(tf.square(self.y_ - self.y))
+    #self.loss = tf.reduce_mean(tf.square(self.y_ - self.y))
+    self.loss = tf.losses.huber_loss(self.y_, self.y)
 
     optimizer = tf.train.RMSPropOptimizer(self.learning_rate)
     self.training = optimizer.minimize(self.loss)
@@ -97,7 +100,7 @@ class DQN:
     #print y_minibatch
     #print type(y_minibatch[0])
     self.sess.run(self.training, feed_dict={self.x:state_minibatch, self.y_:y_minibatch})
-    self.current_loss = self.sess.run(self.loss, feed_dict={self.x:state_minibatch, self.y_:y_minibatch})
+    #self.current_loss = self.sess.run(self.loss, feed_dict={self.x:state_minibatch, self.y_:y_minibatch})
     #print self.current_loss
 
   def store_experience(self, state_t, state_t_1, reward, terminal, action):
@@ -114,12 +117,12 @@ for episode in range(episodes):
   action = agent.get_action(state_t, episode)
   for step in range(steps):
     #env.render()
-    observation, reward, terminal, info = env.step(action)
     state_t = state_t_1
-    state_t_1 = observation.reshape((1, observation.size))
     action = agent.get_action(state_t, episode)
+    observation, reward, terminal, info = env.step(action)
+    state_t_1 = observation.reshape((1, observation.size))
     if terminal:
-      if target_step < step:
+      if step > target_step:
         reward = 1
       else:
         reward = -1
@@ -140,12 +143,10 @@ state_t = state_t_1
 action = agent.get_action(state_t, episode, False)
 for step in range(steps):
   env.render()
-  observation, reward, terminal, info = env.step(action)
   state_t = state_t_1
-  state_t_1 = observation.reshape((1, observation.size))
   action = agent.get_action(state_t, episode, False)
-  agent.store_experience(state_t, state_t_1, reward, terminal, action)
-  agent.experience_replay()
+  observation, reward, terminal, info = env.step(action)
+  state_t_1 = observation.reshape((1, observation.size))
   if terminal:
     print "finished at", step, "step"
     break
