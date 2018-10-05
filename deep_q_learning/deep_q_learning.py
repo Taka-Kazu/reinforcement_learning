@@ -116,7 +116,7 @@ for episode in range(episodes):
   state_t = state_t_1
   action = agent.get_action(state_t, episode)
   for step in range(steps):
-    #env.render()
+    env.render()
     state_t = state_t_1
     action = agent.get_action(state_t, episode)
     observation, reward, terminal, info = env.step(action)
