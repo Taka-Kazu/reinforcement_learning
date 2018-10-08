@@ -6,30 +6,33 @@ import matplotlib.pyplot as plt
 import gym
 import os
 
-EP_MAX = 1000
+from tensorflow.python import debug as tf_debug
+
+RENDER_EP = 100
+EP_MAX = 10000
 EP_LEN = 200
 GAMMA = 0.9
-A_LR = 0.0001
-C_LR = 0.0002
 BATCH = 512
+EPOCH = 3
 A_UPDATE_STEPS = 10
 C_UPDATE_STEPS = 10
 CLIP_EPSILON = 0.2
 NUM_HIDDENS = [256, 256, 256]
-LEARNING_RATE = 1e-3
+LEARNING_RATE = 2e-4
 BETA = 1e-3# entropy
+A_LR = 0.0001
+C_LR = 0.0002
 
 # directories
 LOG_DIR = "./log"
 MODEL_DIR = "./models"
 
-
 def build_summaries():
   with tf.name_scope("logger"):
     reward = tf.Variable(0.)
     tf.summary.scalar("Reward",reward)
-    #entropy = tf.Variable(0.)
-    #tf.summary.scalar("Entropy",entropy)
+    entropy = tf.Variable(0.)
+    tf.summary.scalar("Entropy",entropy)
     learning_rate = tf.Variable(0.)
     tf.summary.scalar("Learning_Rate",learning_rate)
     policy_loss = tf.Variable(0.)
@@ -39,8 +42,8 @@ def build_summaries():
     value_estimate = tf.Variable(0.)
     tf.summary.scalar("Value_Estimate",value_estimate)
 
-    #summary_vars = [reward,entropy,learning_rate,policy_loss,value_loss,value_estimate]
-    summary_vars = [reward,learning_rate,policy_loss,value_loss,value_estimate]
+    summary_vars = [reward,entropy,learning_rate,policy_loss,value_loss,value_estimate]
+    #summary_vars = [reward,learning_rate,policy_loss,value_loss,value_estimate]
     summary_ops = tf.summary.merge_all()
 
   return summary_ops, summary_vars
@@ -61,7 +64,7 @@ class PPO(object):
       self.tfdc_r = tf.placeholder(tf.float32, [None, 1], name='discounted_r')
       self.advantage = self.tfdc_r - self.v
       self.closs = tf.reduce_mean(tf.square(self.advantage))
-      self.ctrain_op = tf.train.AdamOptimizer(C_LR).minimize(self.closs, global_step=self.global_step)
+      self.ctrain_op = tf.train.AdamOptimizer(self.learning_rate).minimize(self.closs, global_step=self.global_step)
 
     # actor
     pi, pi_params = self._build_anet('pi', trainable=True)
@@ -74,16 +77,20 @@ class PPO(object):
     self.tfa = tf.placeholder(tf.float32, [None, NUM_ACTIONS], 'action')
     self.tfadv = tf.placeholder(tf.float32, [None, 1], 'advantage')
     with tf.variable_scope('loss'):
+      with tf.variable_scope('entropy'):
+        self.entropy = BETA * tf.reduce_mean(pi.entropy())
       with tf.variable_scope('surrogate'):
         # ratio = tf.exp(pi.log_prob(self.tfa) - oldpi.log_prob(self.tfa))
-        ratio = pi.prob(self.tfa) / oldpi.prob(self.tfa)
+        # ratio = pi.prob(self.tfa) / oldpi.prob(self.tfa)
+        old_prob = oldpi.prob(self.tfa) + 1e-10
+        ratio = pi.prob(self.tfa) / old_prob
         surr = ratio * self.tfadv
       self.aloss = -tf.reduce_mean(tf.minimum(
         surr,
-        tf.clip_by_value(ratio, 1.-CLIP_EPSILON, 1.+CLIP_EPSILON)*self.tfadv))
+        tf.clip_by_value(ratio, 1.-CLIP_EPSILON, 1.+CLIP_EPSILON)*self.tfadv) - self.entropy)
 
     with tf.variable_scope('atrain'):
-      self.atrain_op = tf.train.AdamOptimizer(A_LR).minimize(self.aloss, global_step=self.global_step)
+      self.atrain_op = tf.train.AdamOptimizer(self.learning_rate).minimize(self.aloss, global_step=self.global_step)
 
   def _build_anet(self, name, trainable):
     with tf.variable_scope(name):
@@ -94,25 +101,26 @@ class PPO(object):
     params = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=name)
     return norm_dist, params
 
-
   def update(self, s, a, r):
-    self.sess.run(self.update_oldpi_op)
-    adv = self.sess.run(self.advantage, {self.tfs: s, self.tfdc_r: r})
-    # adv = (adv - adv.mean())/(adv.std()+1e-6)   # sometimes helpful
+    for _ in range(EPOCH):
+      self.sess.run(self.update_oldpi_op)
+      adv = self.sess.run(self.advantage, {self.tfs: s, self.tfdc_r: r})
+      # adv = (adv - adv.mean())/(adv.std()+1e-6)   # sometimes helpful
 
-    # update actor
-    [self.sess.run(self.atrain_op, {self.tfs: s, self.tfa: a, self.tfadv: adv}) for _ in range(A_UPDATE_STEPS)]
+      # update actor
+      [self.sess.run(self.atrain_op, {self.tfs: s, self.tfa: a, self.tfadv: adv}) for _ in range(A_UPDATE_STEPS)]
 
-    # update critic
-    [self.sess.run(self.ctrain_op, {self.tfs: s, self.tfdc_r: r}) for _ in range(C_UPDATE_STEPS)]
+      # update critic
+      [self.sess.run(self.ctrain_op, {self.tfs: s, self.tfdc_r: r}) for _ in range(C_UPDATE_STEPS)]
 
     _feed_dict={self.tfs:s, self.tfa:a, self.tfdc_r:r, self.tfadv:adv}
     summary_str = self.sess.run(summary_ops, feed_dict={
       summary_vars[0]:r.mean(),
-      summary_vars[1]:self.sess.run(self.learning_rate),
-      summary_vars[2]:self.sess.run(self.aloss, _feed_dict),
-      summary_vars[3]:self.sess.run(self.closs, feed_dict={self.tfs:s, self.tfdc_r:r}),
-      summary_vars[4]:self.sess.run(self.v, feed_dict={self.tfs:s}).mean()
+      summary_vars[1]:self.sess.run(self.entropy, feed_dict={self.tfs:s}) / BETA,
+      summary_vars[2]:self.sess.run(self.learning_rate),
+      summary_vars[3]:self.sess.run(self.aloss, _feed_dict),
+      summary_vars[4]:self.sess.run(self.closs, feed_dict={self.tfs:s, self.tfdc_r:r}),
+      summary_vars[5]:self.sess.run(self.v, feed_dict={self.tfs:s}).mean()
     })
     global GLOBAL_EP
     writer.add_summary(summary_str, global_step=GLOBAL_EP)
@@ -137,6 +145,9 @@ GLOBAL_EP = 0
 
 if __name__=="__main__":
   with tf.Session() as sess:
+    #sess = tf_debug.LocalCLIDebugWrapperSession(sess)
+    #sess.add_tensor_filter('has_inf_or_nan', tf_debug.has_inf_or_nan)
+
     ppo = PPO(sess)
     summary_ops, summary_vars = build_summaries()
     sess.run(tf.global_variables_initializer())
@@ -148,8 +159,8 @@ if __name__=="__main__":
       buffer_s, buffer_a, buffer_r = [], [], []
       ep_r = 0
       for t in range(EP_LEN):    # in one episode
-        if(ep % 50 == 0):
-          env.render()
+        #if(ep % RENDER_EP == 0):
+          #env.render()
         a = ppo.choose_action(s)
         s_, r, done, _ = env.step(a)
         buffer_s.append(s)
