@@ -13,7 +13,7 @@ EP_MAX = 10000
 EP_LEN = 200
 GAMMA = 0.9
 BATCH = 512
-EPOCH = 3
+EPOCH = 1
 A_UPDATE_STEPS = 10
 C_UPDATE_STEPS = 10
 CLIP_EPSILON = 0.2
@@ -22,6 +22,7 @@ LEARNING_RATE = 2e-4
 BETA = 1e-3# entropy
 A_LR = 0.0001
 C_LR = 0.0002
+CELL_SIZE = 64
 
 # directories
 LOG_DIR = "./log"
@@ -93,12 +94,20 @@ class PPO(object):
 
   def _build_net(self, name, trainable):
     with tf.variable_scope(name):
-      l0 = tf.layers.dense(self.s_t, NUM_HIDDENS[0], tf.nn.relu, name="l0")
-      l1 = tf.layers.dense(l0, NUM_HIDDENS[1], tf.nn.relu, name="l1")
-      mu = tf.layers.dense(l1, NUM_ACTIONS, tf.nn.tanh, name="mu", trainable=trainable)
-      sigma = tf.layers.dense(l1, NUM_ACTIONS, tf.nn.softplus, name="sigma", trainable=trainable)
+      with tf.name_scope("lstm"):
+        s = tf.expand_dims(self.s_t, axis=1, name="timely_input")
+        rnn_cell = tf.nn.rnn_cell.BasicLSTMCell(CELL_SIZE, name="lstm_cell")
+        self.init_state = rnn_cell.zero_state(batch_size=1, dtype=tf.float32)
+        #self.init_rnn_op = rnn_cell.zero_state(batch_size=1, dtype=tf.float32)
+        outputs, self.final_state = tf.nn.dynamic_rnn(cell=rnn_cell, inputs=s, initial_state=self.init_state, time_major=True)
+        cell_out = tf.reshape(outputs, [-1, CELL_SIZE], name="flatten_rnn_outputs")
+      la0 = tf.layers.dense(cell_out, NUM_HIDDENS[0], tf.nn.relu, name="la0")
+      la1 = tf.layers.dense(cell_out, NUM_HIDDENS[1], tf.nn.relu, name="la1")
+      mu = tf.layers.dense(la1, NUM_ACTIONS, tf.nn.tanh, name="mu", trainable=trainable)
+      sigma = tf.layers.dense(la1, NUM_ACTIONS, tf.nn.softplus, name="sigma", trainable=trainable)
       norm_dist = tf.distributions.Normal(loc=mu * A_BOUNDS[1], scale=sigma)
-      v = tf.layers.dense(l1, 1, name="value")
+      lc = tf.layers.dense(cell_out, NUM_HIDDENS[0], tf.nn.relu, name="lc")
+      v = tf.layers.dense(lc, 1, name="value")
     params = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=name)
     return norm_dist, v, params
 
@@ -127,14 +136,14 @@ class PPO(object):
     writer.add_summary(summary_str, global_step=GLOBAL_EP)
     writer.flush()
 
-  def choose_action(self, s):
+  def choose_action(self, s, cell_state):
     s = s[np.newaxis, :]
-    a = self.sess.run(self.sample_op, {self.s_t: s})[0]
-    return np.clip(a, A_BOUNDS[0], A_BOUNDS[1])
+    a, cell_state = self.sess.run([self.sample_op, self.final_state], {self.s_t: s, self.init_state:cell_state})
+    return np.clip(a[0], A_BOUNDS[0], A_BOUNDS[1]), cell_state
 
-  def get_v(self, s):
+  def get_v(self, s, rnn_state):
     if s.ndim < 2: s = s[np.newaxis, :]
-    return self.sess.run(self.v, {self.s_t: s})[0, 0]
+    return self.sess.run(self.v, {self.s_t: s, self.init_state: rnn_state})[0, 0]
 
 env = gym.make('Pendulum-v0').unwrapped
 
@@ -159,20 +168,24 @@ if __name__=="__main__":
       s = env.reset()
       buffer_s, buffer_a, buffer_r = [], [], []
       ep_r = 0
+      rnn_state = sess.run(ppo.init_state)
+      #keep_state = rnn_state.copy()
+
       for t in range(EP_LEN):    # in one episode
         if(ep % RENDER_EP == 0) and (ep != 0):
           env.render()
-        a = ppo.choose_action(s)
+        a, rnn_state_ = ppo.choose_action(s, rnn_state)
         s_, r, done, _ = env.step(a)
         buffer_s.append(s)
         buffer_a.append(a)
         buffer_r.append((r+8)/8)  # normalize reward, find to be useful
         s = s_
+        rnn_state = rnn_state_
         ep_r += r
 
         # update ppo
         if (t+1) % BATCH == 0 or t == EP_LEN-1:
-          v_s_ = ppo.get_v(s_)
+          v_s_ = ppo.get_v(s_, rnn_state_)
           discounted_r = []
           for r in buffer_r[::-1]:
             v_s_ = r + GAMMA * v_s_
@@ -182,6 +195,7 @@ if __name__=="__main__":
           bs, ba, br = np.vstack(buffer_s), np.vstack(buffer_a), np.array(discounted_r)[:, np.newaxis]
           buffer_s, buffer_a, buffer_r = [], [], []
           ppo.update(bs, ba, br)
+          #keep_state = rnn_state_.copy()
       print(
         'Ep: %i' % ep,
         "|Ep_r: %i" % ep_r,
