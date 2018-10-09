@@ -57,23 +57,22 @@ class PPO(object):
     self.global_step = tf.Variable(0, trainable=False)
     self.learning_rate = tf.train.exponential_decay(LEARNING_RATE, self.global_step, 1000, 0.98, staircase=True)
 
+    # common
+    pi, self.v, pi_params = self._build_net('pi', trainable=True)
+    oldpi, _, oldpi_params = self._build_net('oldpi', trainable=False)
+
     # critic
     with tf.variable_scope('critic'):
-      l1 = tf.layers.dense(self.s_t, NUM_HIDDENS[0], tf.nn.relu, name="l1")
-      self.v = tf.layers.dense(l1, 1, name="value")
       self.tfdc_r = tf.placeholder(tf.float32, [None, 1], name='discounted_r')
       self.advantage = self.tfdc_r - self.v
       self.c_loss = tf.reduce_mean(tf.square(self.advantage))
       self.c_train_op = tf.train.AdamOptimizer(self.learning_rate).minimize(self.c_loss, global_step=self.global_step)
 
     # actor
-    pi, pi_params = self._build_anet('pi', trainable=True)
-    oldpi, oldpi_params = self._build_anet('oldpi', trainable=False)
     with tf.variable_scope('sample_action'):
       self.sample_op = tf.squeeze(pi.sample(1), axis=0)   # choosing action
     with tf.variable_scope('update_oldpi'):
       self.update_oldpi_op = [oldp.assign(p) for p, oldp in zip(pi_params, oldpi_params)]
-
     self.a_t = tf.placeholder(tf.float32, [None, NUM_ACTIONS], 'action')
     self.adv = tf.placeholder(tf.float32, [None, 1], 'advantage')
     with tf.variable_scope('loss'):
@@ -92,14 +91,16 @@ class PPO(object):
     with tf.variable_scope('a_train'):
       self.a_train_op = tf.train.AdamOptimizer(self.learning_rate).minimize(self.a_loss, global_step=self.global_step)
 
-  def _build_anet(self, name, trainable):
+  def _build_net(self, name, trainable):
     with tf.variable_scope(name):
-      l1 = tf.layers.dense(self.s_t, NUM_HIDDENS[0], tf.nn.relu, name="l1", trainable=trainable)
+      l0 = tf.layers.dense(self.s_t, NUM_HIDDENS[0], tf.nn.relu, name="l0")
+      l1 = tf.layers.dense(l0, NUM_HIDDENS[1], tf.nn.relu, name="l1")
       mu = tf.layers.dense(l1, NUM_ACTIONS, tf.nn.tanh, name="mu", trainable=trainable)
       sigma = tf.layers.dense(l1, NUM_ACTIONS, tf.nn.softplus, name="sigma", trainable=trainable)
       norm_dist = tf.distributions.Normal(loc=mu * A_BOUNDS[1], scale=sigma)
+      v = tf.layers.dense(l1, 1, name="value")
     params = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=name)
-    return norm_dist, params
+    return norm_dist, v, params
 
   def update(self, s, a, r):
     for _ in range(EPOCH):
