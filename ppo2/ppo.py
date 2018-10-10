@@ -8,7 +8,6 @@ import os
 
 from tensorflow.python import debug as tf_debug
 
-RENDER_EP = 100
 EP_MAX = 10000
 EP_LEN = 200
 GAMMA = 0.9
@@ -27,6 +26,9 @@ CELL_SIZE = 64
 # directories
 LOG_DIR = "./log"
 MODEL_DIR = "./models"
+
+MODEL_SAVE_INTERVAL = 100
+RENDER_EP = 100
 
 def build_summaries():
   with tf.name_scope("logger"):
@@ -229,4 +231,6 @@ if __name__=="__main__":
         "|Ep_r: %i" % ep_r
       )
       GLOBAL_EP += 1
+      if GLOBAL_EP % MODEL_SAVE_INTERVAL == 0:
+        saver.save(sess, MODEL_DIR + "/ppo_model_ep_" + str(GLOBAL_EP) + ".ckpt")
 
