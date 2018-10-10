@@ -63,7 +63,7 @@ class PPO(object):
     with tf.name_scope("lstm"):
       # https://github.com/MatheusMRFM/A3C-LSTM-with-Tensorflow/blob/master/Network.py
       # https://github.com/MorvanZhou/Reinforcement-learning-with-tensorflow/blob/master/contents/10_A3C/A3C_RNN.py
-      lstm_input = tf.expand_dims(self.s_t, [0], name="lstm_input")
+      lstm_input = tf.expand_dims(self.s_t, axis=0, name="lstm_input")
       step_size = tf.shape(self.s_t)[:1]
       lstm_cell = tf.nn.rnn_cell.BasicLSTMCell(CELL_SIZE, name="lstm_cell")
       c_init = np.zeros((1, lstm_cell.state_size.c), np.float32)
@@ -78,7 +78,7 @@ class PPO(object):
                                                inputs=lstm_input,
                                                initial_state=lstm_state_input,
                                                sequence_length=step_size,
-                                               time_major=False# batch_major
+                                               time_major=False# False:batch_major
                                                )
       lstm_c, lstm_h = final_state
       self.state_out = [lstm_c[:1, :], lstm_h[:1, :]]
