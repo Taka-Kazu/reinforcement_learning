@@ -5,13 +5,14 @@ import numpy as np
 import matplotlib.pyplot as plt
 import gym
 import os
+import threading, time
 
 from tensorflow.python import debug as tf_debug
 
 EP_MAX = 10000
 EP_LEN = 200
 GAMMA = 0.9
-BATCH = 512
+BATCH = 2048
 EPOCH = 1
 A_UPDATE_STEPS = 10
 C_UPDATE_STEPS = 10
@@ -29,6 +30,9 @@ MODEL_DIR = "./models"
 
 MODEL_SAVE_INTERVAL = 100
 RENDER_EP = 100
+
+NN_MODEL = None
+NUM_WORKERS = 8
 
 def build_summaries():
   with tf.name_scope("logger"):
@@ -165,47 +169,24 @@ class PPO(object):
     if s.ndim < 2: s = s[np.newaxis, :]
     return self.sess.run(self.v, {self.s_t: s, self.state_input[0]: rnn_state[0], self.state_input[1]: rnn_state[1]})[0, 0]
 
-env = gym.make('Pendulum-v0').unwrapped
+class Worker:
+  def __init__(self, name, brain):
+    self.env = gym.make('Pendulum-v0')
+    self.name = name
 
-NUM_STATES = env.observation_space.shape[0]
-NUM_ACTIONS = env.action_space.shape[0]
-A_BOUNDS = [env.action_space.low, env.action_space.high]
-NONE_STATE = np.zeros(NUM_STATES)
-GLOBAL_EP = 0
-
-if __name__=="__main__":
-  config = tf.ConfigProto(
-    log_device_placement=True,
-    allow_soft_placement=True,
-    gpu_options=tf.GPUOptions(
-      visible_device_list="0",
-      allow_growth=True
-    )
-  )
-  sess = tf.Session(config=config)
-  #with tf.Session(config=config) as sess:
-  with tf.device("/gpu:0"):
-    #sess = tf_debug.LocalCLIDebugWrapperSession(sess)
-    #sess.add_tensor_filter('has_inf_or_nan', tf_debug.has_inf_or_nan)
-
-    ppo = PPO(sess)
-    summary_ops, summary_vars = build_summaries()
-    sess.run(tf.global_variables_initializer())
-    writer = tf.summary.FileWriter(LOG_DIR, sess.graph)
-    saver = tf.train.Saver()
-
-    for ep in range(EP_MAX):
-      s = env.reset()
+  def run(self):
+    global GLOBAL_EP
+    while not COORD.should_stop():
+      s = self.env.reset()
       buffer_s, buffer_a, buffer_r = [], [], []
       ep_r = 0
       rnn_state = ppo.lstm_init_op
       #keep_state = rnn_state.copy()
-
       for t in range(EP_LEN):    # in one episode
-        if(ep % RENDER_EP == 0) and (ep != 0):
-          env.render()
+        if(self.name=="W_0"):
+          self.env.render()
         a, rnn_state_ = ppo.choose_action(s, rnn_state)
-        s_, r, done, _ = env.step(a)
+        s_, r, done, _ = self.env.step(a)
         buffer_s.append(s)
         buffer_a.append(a)
         buffer_r.append((r+8)/8)  # normalize reward, find to be useful
@@ -227,10 +208,58 @@ if __name__=="__main__":
           ppo.update(bs, ba, br, rnn_state_)
           #keep_state = rnn_state_.copy()
       print(
-        'Ep: %i' % ep,
+        self.name,
+        '|Ep: %i' % GLOBAL_EP,
         "|Ep_r: %i" % ep_r
       )
       GLOBAL_EP += 1
       if GLOBAL_EP % MODEL_SAVE_INTERVAL == 0:
         saver.save(sess, MODEL_DIR + "/ppo_model_ep_" + str(GLOBAL_EP) + ".ckpt")
+
+env = gym.make('Pendulum-v0')
+
+NUM_STATES = env.observation_space.shape[0]
+NUM_ACTIONS = env.action_space.shape[0]
+A_BOUNDS = [env.action_space.low, env.action_space.high]
+NONE_STATE = np.zeros(NUM_STATES)
+GLOBAL_EP = 0
+
+if __name__=="__main__":
+  config = tf.ConfigProto(
+    log_device_placement=False,
+    allow_soft_placement=True,
+    gpu_options=tf.GPUOptions(
+      visible_device_list="0",
+      allow_growth=True
+    )
+  )
+  sess = tf.Session(config=config)
+  #with tf.Session(config=config) as sess:
+  with tf.device("/gpu:0"):
+    #sess = tf_debug.LocalCLIDebugWrapperSession(sess)
+    #sess.add_tensor_filter('has_inf_or_nan', tf_debug.has_inf_or_nan)
+
+    ppo = PPO(sess)
+    workers = []
+    for i in range(NUM_WORKERS):
+      worker_name="W_%i" % i
+      workers.append(Worker(worker_name, ppo))
+
+    summary_ops, summary_vars = build_summaries()
+    COORD = tf.train.Coordinator()
+    sess.run(tf.global_variables_initializer())
+    writer = tf.summary.FileWriter(LOG_DIR, sess.graph)
+    saver = tf.train.Saver()
+
+    nn_model = NN_MODEL
+    if nn_model is not None:
+      saver.restore(sess, nn_model)
+
+    worker_threads = []
+    for worker in workers:
+      job = lambda:worker.run()
+      t = threading.Thread(target=job)
+      t.start()
+      worker_threads.append(t)
+    COORD.join(worker_threads)
 
