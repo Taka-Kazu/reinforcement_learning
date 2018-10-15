@@ -9,6 +9,11 @@ import threading, time
 
 from tensorflow.python import debug as tf_debug
 
+import myenv
+
+#GAME='Pendulum-v0'
+GAME='myenv-v2'
+
 EP_MAX = 10000
 EP_LEN = 200
 GAMMA = 0.9
@@ -59,11 +64,12 @@ class PPO(object):
 
   def __init__(self, sess):
     self.sess = sess
-    self.s_t = tf.placeholder(tf.float32, [None, NUM_STATES], 'state')
+    self.s_t = tf.placeholder(tf.float32, shape=(None, NUM_STATES), name='state')
 
     self.global_step = tf.Variable(0., trainable=False)
     self.learning_rate = tf.train.exponential_decay(LEARNING_RATE, self.global_step, 1000, 0.98, staircase=True)
 
+    self.weight_init = tf.random_normal_initializer(0.0, 0.1)
     with tf.name_scope("lstm"):
       # https://github.com/MatheusMRFM/A3C-LSTM-with-Tensorflow/blob/master/Network.py
       # https://github.com/MorvanZhou/Reinforcement-learning-with-tensorflow/blob/master/contents/10_A3C/A3C_RNN.py
@@ -95,7 +101,7 @@ class PPO(object):
     # critic
     with tf.variable_scope('critic'):
       lc = tf.layers.dense(self.cell_out, NUM_HIDDENS[0], tf.nn.relu, name="lc")
-      self.v = tf.layers.dense(lc, 1, name="value")
+      self.v = tf.layers.dense(lc, 1, kernel_initializer=self.weight_init, name="value")
       self.tfdc_r = tf.placeholder(tf.float32, [None, 1], name='discounted_r')
       self.advantage = self.tfdc_r - self.v
       self.c_loss = tf.reduce_mean(tf.square(self.advantage))
@@ -127,10 +133,10 @@ class PPO(object):
 
   def _build_net(self, name, trainable):
     with tf.variable_scope(name):
-      la0 = tf.layers.dense(self.cell_out, NUM_HIDDENS[0], tf.nn.relu, name="la0")
-      la1 = tf.layers.dense(la0, NUM_HIDDENS[1], tf.nn.relu, name="la1")
-      mu = tf.layers.dense(la1, NUM_ACTIONS, tf.nn.tanh, name="mu", trainable=trainable)
-      sigma = tf.layers.dense(la1, NUM_ACTIONS, tf.nn.softplus, name="sigma", trainable=trainable)
+      la0 = tf.layers.dense(self.cell_out, NUM_HIDDENS[0], tf.nn.relu, kernel_initializer=self.weight_init, name="la0")
+      la1 = tf.layers.dense(la0, NUM_HIDDENS[1], tf.nn.relu, kernel_initializer=self.weight_init, name="la1")
+      mu = tf.layers.dense(la1, NUM_ACTIONS, tf.nn.tanh, kernel_initializer=self.weight_init, name="mu", trainable=trainable)
+      sigma = tf.layers.dense(la1, NUM_ACTIONS, tf.nn.softplus, kernel_initializer=self.weight_init, name="sigma", trainable=trainable)
       norm_dist = tf.distributions.Normal(loc=mu * A_BOUNDS[1], scale=sigma)
     params = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=name)
     return norm_dist, params
@@ -171,7 +177,7 @@ class PPO(object):
 
 class Worker:
   def __init__(self, name, brain):
-    self.env = gym.make('Pendulum-v0')
+    self.env = gym.make(GAME)
     self.name = name
 
   def run(self):
@@ -216,7 +222,7 @@ class Worker:
       if GLOBAL_EP % MODEL_SAVE_INTERVAL == 0:
         saver.save(sess, MODEL_DIR + "/ppo_model_ep_" + str(GLOBAL_EP) + ".ckpt")
 
-env = gym.make('Pendulum-v0')
+env = gym.make(GAME)
 
 NUM_STATES = env.observation_space.shape[0]
 NUM_ACTIONS = env.action_space.shape[0]
