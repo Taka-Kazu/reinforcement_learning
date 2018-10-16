@@ -9,6 +9,8 @@ import threading, time
 
 from tensorflow.python import debug as tf_debug
 
+#import pyximport
+#pyximport.install(inplace=True)
 import myenv
 
 GAME='Pendulum-v0'
@@ -17,10 +19,10 @@ GAME='Pendulum-v0'
 EP_MAX = 10000
 EP_LEN = 200
 GAMMA = 0.9
-BATCH = 2048
+BATCH = 512
 EPOCH = 3
 CLIP_EPSILON = 0.2
-NUM_HIDDENS = [256, 256, 256]
+NUM_HIDDENS = [512, 512, 512]
 LEARNING_RATE = 1e-4
 BETA = 1e-3# entropy
 
@@ -31,8 +33,10 @@ MODEL_DIR = "./models"
 MODEL_SAVE_INTERVAL = 100
 RENDER_EP = 100
 
+GLOBAL_EP = 0
 NN_MODEL = None
-NUM_WORKERS = 8
+#NN_MODEL = "/home/amsl/reinforcement_learning/ppo/models/ppo_model_ep_3200.ckpt"
+NUM_WORKERS = 32
 
 def build_summaries():
   with tf.name_scope("logger"):
@@ -161,15 +165,19 @@ class Worker:
         if(self.name=="W_0"):
           self.env.render()
         a = ppo.choose_action(s)
+        start_time = time.time()
         s_, r, done, _ = self.env.step(a)
+        elapsed_time = time.time() - start_time
+        #print ("elapsed_time:{0}".format(elapsed_time) + "[sec]")
         buffer_s.append(s)
         buffer_a.append(a)
         buffer_r.append((r+8)/8)  # normalize reward, find to be useful
+        #buffer_r.append(r)
         s = s_
         ep_r += r
 
         # update ppo
-        if (t+1) % BATCH == 0 or t == EP_LEN-1:
+        if (t+1) % BATCH == 0 or t == EP_LEN-1 or done:
           v_s_ = ppo.get_v(s_)
           discounted_r = []
           for r in buffer_r[::-1]:
@@ -180,10 +188,13 @@ class Worker:
           bs, ba, br = np.vstack(buffer_s), np.vstack(buffer_a), np.array(discounted_r)[:, np.newaxis]
           buffer_s, buffer_a, buffer_r = [], [], []
           ppo.update(bs, ba, br)
+
+        if done:
+          break;
       print(
         self.name,
         '|Ep: %i' % GLOBAL_EP,
-        "|Ep_r: %i" % ep_r
+        "|Ep_r: %f" % ep_r
       )
       GLOBAL_EP += 1
       if GLOBAL_EP % MODEL_SAVE_INTERVAL == 0:
@@ -195,7 +206,6 @@ NUM_STATES = env.observation_space.shape[0]
 NUM_ACTIONS = env.action_space.shape[0]
 A_BOUNDS = [env.action_space.low, env.action_space.high]
 NONE_STATE = np.zeros(NUM_STATES)
-GLOBAL_EP = 0
 
 if __name__=="__main__":
   config = tf.ConfigProto(
