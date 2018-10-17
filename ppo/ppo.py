@@ -19,12 +19,12 @@ GAME='Pendulum-v0'
 EP_MAX = 10000
 EP_LEN = 200
 GAMMA = 0.9
-BATCH = 512
+BATCH = 64
 EPOCH = 3
 CLIP_EPSILON = 0.2
-NUM_HIDDENS = [512, 512, 512]
+NUM_HIDDENS = [256, 256, 256]
 LEARNING_RATE = 1e-4
-BETA = 1e-3# entropy
+BETA = 1e-4# entropy
 
 # directories
 LOG_DIR = "./log"
@@ -118,13 +118,15 @@ class PPO(object):
 
   def update(self, s, a, r):
     self.sess.run(self.update_oldpi_op)
-    for _ in range(EPOCH):
-      adv = self.sess.run(self.advantage, {self.s_t: s, self.tfdc_r: r})
-      # adv = (adv - adv.mean())/(adv.std()+1e-6)   # sometimes helpful
 
+    adv = self.sess.run(self.advantage, {self.s_t: s, self.tfdc_r: r})
+    # adv = (adv - adv.mean())/(adv.std()+1e-6)   # sometimes helpful
+
+    for _ in range(EPOCH):
       # update actor
       self.sess.run(self.a_train_op, {self.s_t: s, self.a_t: a, self.adv: adv})
 
+    for _ in range(EPOCH):
       # update critic
       self.sess.run(self.c_train_op, {self.s_t: s, self.tfdc_r: r})
 
@@ -244,5 +246,6 @@ if __name__=="__main__":
       t = threading.Thread(target=job)
       t.start()
       worker_threads.append(t)
-    COORD.join(worker_threads)
+    with COORD.stop_on_exception():
+      COORD.join(worker_threads)
 

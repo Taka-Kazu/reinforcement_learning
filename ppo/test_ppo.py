@@ -1,27 +1,21 @@
 import tensorflow as tf
 import numpy as np
 import gym
-from ppo import PPONet
+from ppo import PPO
 
 GAME = 'Pendulum-v0'
 MAX_EP_STEP = 1000
 MAX_EP = 10
 GLOBAL_RUNNING_R = []
 GLOBAL_EP = 0
-NN_MODEL = './models/ppo_model_ep_6300.ckpt'
+NN_MODEL = './models/ppo_model_ep_10000.ckpt'
 env = gym.make(GAME)
-
-#NUM_STATES = env.observation_space.shape[0]
-#NUM_ACTIONS = env.action_space.shape[0]
-#A_BOUNDS = [env.action_space.low, env.action_space.high]
-#NUM_HIDDEN = [256,256,256]
-#EPSILON = 0.2
 
 def main():
   #with tf.Session() as sess:
   sess = tf.Session()
   with tf.device("/cpu:0"):
-    brain = PPONet(sess)
+    agent = PPO(sess)
     saver = tf.train.Saver()
     saver.restore(sess, NN_MODEL)
 
@@ -31,8 +25,8 @@ def main():
       for t in range(MAX_EP_STEP):
         env.render()
 
-        s = np.array([s])
-        a = brain.predict_a(s).reshape(-1)
+        #s = np.array([s])
+        a = agent.choose_action(s).reshape(-1)
 
         s_, r, done, info = env.step(a)
         if t ==  MAX_EP_STEP-1:
