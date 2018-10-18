@@ -341,13 +341,13 @@ class MyEnv(gym.Env):
       if not self.is_movable_grid(pose_):
         _x = (x-x0)*(x-x0)
         _y = (y-y0)*(y-y0)
-        return sqrt(_x + _y + 1e-8) * self.MAP_RESOLUTION
+        return sqrt(_x + _y) * self.MAP_RESOLUTION
     else:
       pose_ = [x,y,0]
       if not self.is_movable_grid(pose_):
         _x = (x-x0)*(x-x0)
         _y = (y-y0)*(y-y0)
-        return sqrt(_x + _y + 1e-8) * self.MAP_RESOLUTION
+        return sqrt(_x + _y) * self.MAP_RESOLUTION
     x_limit = x1 + x_step
     while x != x_limit:
       x = x + x_step
@@ -360,13 +360,13 @@ class MyEnv(gym.Env):
           if not self.is_movable_grid(pose_):
             _x = (x-x0)*(x-x0)
             _y = (y-y0)*(y-y0)
-            return sqrt(_x + _y + 1e-8) * self.MAP_RESOLUTION
+            return sqrt(_x + _y) * self.MAP_RESOLUTION
         else:
           pose_ = [x,y,0]
           if not self.is_movable_grid(pose_):
             _x = (x-x0)*(x-x0)
             _y = (y-y0)*(y-y0)
-            return sqrt(_x + _y + 1e-8) * self.MAP_RESOLUTION
+            return sqrt(_x + _y) * self.MAP_RESOLUTION
 
     return self.RANGE_MAX
 
