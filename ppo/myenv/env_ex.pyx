@@ -9,31 +9,40 @@ import math
 
 import time
 
-import cython
+cimport cython
 cimport numpy as np
-from libc.math cimport sqrt, sin, cos, atan2, abs
+from libc.math cimport sqrt, sin, cos, atan2
+from libc.math cimport abs as cabs
 
-def make_circle(MAP,cx,cy,r):
+DTYPE = np.float32
+ctypedef np.float32_t DTYPE_t
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+
+cdef make_circle(list MAP, int cx, int cy, int r):
   cdef int i, j
   for i in range(cx-r-1,cx+r):
     for j in range(cy-r-1,cy+r):
       if sqrt((i-cx)**2+(j-cy)**2) < r:
         MAP[i][j] = 1
 
-def make_rectangle(MAP,l,r,t,b):
+cdef make_rectangle(list MAP, int l, int r, int t, int b):
   cdef int i, j
   for i in range(l-1,r):
     for j in range(t-1,b):
       MAP[i][j] = 1
 
-def reset_map(int size):
-  #MAP = np.zeros((size,size))
-  cdef list MAP
+cdef list reset_map(int size):
+  cdef list MAP = [[]*size]*size
+  cdef int lim
   MAP=[[0 for _ in range(size)] for _ in range(size)]
-  for i in range(0,size-1):
+  lim = size - 1
+  for i in range(0, lim):
     MAP[i][0] = 1
     MAP[i][size-1] = 1
-  for j in range(1,size-2):
+  lim = size - 2
+  for j in range(1, lim):
     MAP[0][j] = 1
     MAP[size-1][j] = 1
   make_rectangle(MAP,350,650,600,650)
@@ -42,17 +51,18 @@ def reset_map(int size):
   make_rectangle(MAP,800,850,375,625)
   return MAP
 
-def angle_nomalize(z):
+cdef double angle_nomalize(z):
   return atan2(sin(z), cos(z))
 
-def angle_diff(a,b):
+cdef double angle_diff(double a,double b):
+  cdef double d1, d2
   a = angle_nomalize(a)
   b = angle_nomalize(b)
   d1 = a -b
-  d2 = 2.0 * math.pi - abs(d1)
+  d2 = 2.0 * math.pi - cabs(d1)
   if d1 > 0.0:
     d2 *= -1.0
-  if abs(d1) < abs(d2):
+  if cabs(d1) < abs(d2):
     return d1
   else:
     return d2
@@ -130,11 +140,13 @@ class MyEnv(gym.Env):
     return self.observation
 
   def step(self, action):
+    cdef double reward
     #pose update
     self.pose[0] = self.pose[0] + (action[0] * cos(self.pose[2]) - action[1] * sin(self.pose[2])) * self.DT
     self.pose[1] = self.pose[1] + (action[0] * sin(self.pose[2]) + action[1] * cos(self.pose[2])) * self.DT
     self.pose[2] = self.pose[2] + action[2] * self.DT
-    self.pose[2] %= 2.0 * math.pi
+    #self.pose[2] %= 2.0 * math.pi
+    self.pose[2] = angle_nomalize(self.pose[2])
     self.observation = self.observe()
     reward = self.get_reward()
     self.done = self.is_done()
@@ -234,18 +246,18 @@ class MyEnv(gym.Env):
 
   def get_reward(self):
     cdef double reward, dx, dy
-    reward = 0
+    reward = 0.0
     dx = self.target[0] - self.pose[0]
     dy = self.target[1] - self.pose[1]
     self.dis = sqrt(dx * dx + dy * dy)
     if self.is_goal():
-      reward = 1.
+      reward = 1.0
     elif (not self.is_movable(self.pose)) or self.is_collision(self.pose):
-      reward = -0.5
+      reward = -1.0
     else:
-      reward = (self.pre_dis-self.dis)*0.01
-    reward = -0.01 * abs(angle_diff(self.pose[2], atan2(self.target[1] - self.init_pose[1], self.target[0] - self.init_pose[0])))
-    #if abs(self.pre_dis-self.dis) < 1e-6:
+      reward = (self.pre_dis-self.dis)*0.005
+    reward += -0.001 * cabs(angle_diff(self.pose[2], atan2(self.target[1] - self.init_pose[1], self.target[0] - self.init_pose[0])))
+    #if cabs(self.pre_dis-self.dis) < 1e-6:
     #  reward -=0.01
     self.pre_dis = self.dis
 #    reward += 1./(200.*np.pi)*angle_diff(np.arctan2((self.pose[1]-self.target[1]),(self.pose[0]-self.target[0])),self.pose[2])
@@ -265,10 +277,8 @@ class MyEnv(gym.Env):
 
   def is_collision(self, list pose):
     cdef double min_dis, margin_collision
-    cdef int NUM_CHECK
     min_dis = self.RANGE_MAX
     margin_collision = self.robot_radius * 0.1
-    NUM_CHECK = 36
     min_dis = np.amin(self.last_lidar_data)
     return min_dis < self.robot_radius + margin_collision
 
@@ -276,24 +286,22 @@ class MyEnv(gym.Env):
     return self.dis < self.robot_radius
 
   def observe(self):
-    cdef list lidar
     cdef int i, j, _start, _end
     cdef double angle, theta, a_n
+    cdef np.ndarray observation = np.empty(self.observation_space.shape[0], dtype=DTYPE)
     a_n = self.ANGLE_INCREMENT/(float)(self.NUM_KERNEL)
-    observation = np.zeros(self.observation_space.shape[0])
+    cdef np.ndarray lidar = np.empty(self.NUM_KERNEL, dtype=DTYPE)
     #LIDAR
     for i in range(self.NUM_LIDAR):
-      lidar = [0]*self.NUM_KERNEL
       _start = i*self.NUM_KERNEL
       _end = (i+1)*self.NUM_KERNEL
       for j in range(_start, _end):
-        #angle = j * self.ANGLE_INCREMENT/self.NUM_KERNEL - self.MAX_ANGLE
         angle = j * a_n - self.MAX_ANGLE
         lidar[j-_start] = self.raycasting(self.pose,angle)
       observation[i] = np.amin(lidar)
     self.last_lidar_data = observation[0:self.NUM_LIDAR]
     #pose
-    observation[self.NUM_LIDAR] = sqrt((self.target[0]-self.pose[0])**2 +(self.target[1]-self.pose[1])**2)
+    observation[self.NUM_LIDAR] = sqrt((self.target[0]-self.pose[0])*(self.target[0]-self.pose[0]) + (self.target[1]-self.pose[1])*(self.target[1]-self.pose[1]))
     theta = atan2((self.target[1]-self.pose[1]),(self.target[0]-self.pose[0]))
     theta = angle_diff(theta,self.pose[2])
     observation[self.NUM_LIDAR+1] = sin(theta)
@@ -318,17 +326,19 @@ class MyEnv(gym.Env):
 
   def raycasting(self, list pose, double angle):
     cdef int x0, y0, x1, y1, dx, dy, error, derror, x_step, y_step, x, y, x_limit, _x, _y
+    cdef list pose_ = [0 for _ in range(3)]
+    cdef bint steep
 
     x0 = int(pose[0]/self.MAP_RESOLUTION)
     y0 = int(pose[1]/self.MAP_RESOLUTION)
     x1 = int((pose[0]+self.RANGE_MAX * cos(pose[2]+angle))/self.MAP_RESOLUTION)
     y1 = int((pose[1]+self.RANGE_MAX * sin(pose[2]+angle))/self.MAP_RESOLUTION)
     steep = False
-    if abs(y1-y0) > abs(x1-x0):
+    if cabs(y1-y0) > abs(x1-x0):
       steep = True
       x0, y0 = y0, x0
       x1, y1 = y1, x1
-    dx, dy = abs(x1-x0), abs(y1-y0)
+    dx, dy = cabs(x1-x0), abs(y1-y0)
     error, derror = 0, dy
     x, y = x0, y0
     x_step, y_step = -1, -1
@@ -337,32 +347,44 @@ class MyEnv(gym.Env):
     if y0<y1:
       y_step = 1
     if steep:
-      pose_ = [y,x,0]
+      #pose_ = [y,x,0]
+      pose_[0] = y
+      pose_[1] = x
       if not self.is_movable_grid(pose_):
         _x = (x-x0)*(x-x0)
         _y = (y-y0)*(y-y0)
         return sqrt(_x + _y) * self.MAP_RESOLUTION
     else:
-      pose_ = [x,y,0]
+      #pose_ = [x,y,0]
+      pose_[0] = x
+      pose_[1] = y
       if not self.is_movable_grid(pose_):
         _x = (x-x0)*(x-x0)
         _y = (y-y0)*(y-y0)
         return sqrt(_x + _y) * self.MAP_RESOLUTION
     x_limit = x1 + x_step
-    while x != x_limit:
+    #while x != x_limit:
+    while True:
+      if x == x_limit:
+        break;
       x = x + x_step
       error = error + derror
       if 2.0*error >= dx:
         y = y + y_step
         error = error - dx
+        ############################
         if steep:
-          pose_ = [y,x,0]
+          #pose_ = [y,x,0]
+          pose_[0] = y
+          pose_[1] = x
           if not self.is_movable_grid(pose_):
             _x = (x-x0)*(x-x0)
             _y = (y-y0)*(y-y0)
             return sqrt(_x + _y) * self.MAP_RESOLUTION
         else:
-          pose_ = [x,y,0]
+          #pose_ = [x,y,0]
+          pose_[0] = x
+          pose_[1] = y
           if not self.is_movable_grid(pose_):
             _x = (x-x0)*(x-x0)
             _y = (y-y0)*(y-y0)
@@ -371,6 +393,8 @@ class MyEnv(gym.Env):
     return self.RANGE_MAX
 
   def target_available(self, list pose):
+    cdef double min_dis, margin_collision, angle, dis
+    cdef int i, NUM_CHECK
     min_dis = self.RANGE_MAX
     margin_collision = self.robot_radius * 0.1
     NUM_CHECK = 36

@@ -38,9 +38,9 @@ MODEL_DIR = "./models"
 MODEL_SAVE_INTERVAL = 100
 RENDER_EP = 100
 
-GLOBAL_EP = 0
+GLOBAL_EP = 6000
 NN_MODEL = None
-#NN_MODEL = "/home/amsl/reinforcement_learning/ppo/models/ppo_model_ep_2800.ckpt"
+NN_MODEL = "/home/amsl/reinforcement_learning/ppo/models/ppo_model_ep_" + str(GLOBAL_EP) + ".ckpt"
 NUM_WORKERS = 32
 
 def build_summaries():
@@ -170,8 +170,8 @@ class Worker:
       buffer_s, buffer_a, buffer_r = [], [], []
       ep_r = 0
       for t in range(EP_LEN):    # in one episode
-        #if(self.name=="W_0"):
-        #  self.env.render()
+        if(self.name=="W_0"):
+          self.env.render()
         a = ppo.choose_action(s)
         start_time = time.time()
         s_, r, done, _ = self.env.step(a)
