@@ -2,3 +2,7 @@
 models/*
 log/*
 results/*
+myenv/*.pyc
+myenv/build/*
+myenv/*.c
+myenv/*.so

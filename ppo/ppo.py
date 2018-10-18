@@ -13,8 +13,13 @@ from tensorflow.python import debug as tf_debug
 #pyximport.install(inplace=True)
 import myenv
 
-GAME='Pendulum-v0'
-#GAME='myenv-v2'
+#GAME='Pendulum-v0'
+GAME='myenv-v2'
+env = gym.make(GAME)
+NUM_STATES = env.observation_space.shape[0]
+NUM_ACTIONS = env.action_space.shape[0]
+A_BOUNDS = [env.action_space.low, env.action_space.high]
+NONE_STATE = np.zeros(NUM_STATES)
 
 EP_MAX = 10000
 EP_LEN = 200
@@ -22,7 +27,7 @@ GAMMA = 0.9
 BATCH = 64
 EPOCH = 3
 CLIP_EPSILON = 0.2
-NUM_HIDDENS = [256, 256, 256]
+NUM_HIDDENS = [512, 512, 512]
 LEARNING_RATE = 1e-4
 BETA = 1e-4# entropy
 
@@ -35,7 +40,7 @@ RENDER_EP = 100
 
 GLOBAL_EP = 0
 NN_MODEL = None
-#NN_MODEL = "/home/amsl/reinforcement_learning/ppo/models/ppo_model_ep_3200.ckpt"
+#NN_MODEL = "/home/amsl/reinforcement_learning/ppo/models/ppo_model_ep_2800.ckpt"
 NUM_WORKERS = 32
 
 def build_summaries():
@@ -113,6 +118,7 @@ class PPO(object):
       mu = tf.layers.dense(la1, NUM_ACTIONS, tf.nn.tanh, kernel_initializer=self.weight_init, name="mu", trainable=trainable)
       sigma = tf.layers.dense(la1, NUM_ACTIONS, tf.nn.softplus, kernel_initializer=self.weight_init, name="sigma", trainable=trainable)
       norm_dist = tf.distributions.Normal(loc=mu * A_BOUNDS[1], scale=sigma)
+      #prob = tf.layers.dense(la1, NUM_ACTIONS, tf.nn.softmax, kernel_initializer=self.weight_init, name="prob", trainable=trainable)
     params = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=name)
     return norm_dist, params
 
@@ -164,8 +170,8 @@ class Worker:
       buffer_s, buffer_a, buffer_r = [], [], []
       ep_r = 0
       for t in range(EP_LEN):    # in one episode
-        if(self.name=="W_0"):
-          self.env.render()
+        #if(self.name=="W_0"):
+        #  self.env.render()
         a = ppo.choose_action(s)
         start_time = time.time()
         s_, r, done, _ = self.env.step(a)
@@ -173,8 +179,8 @@ class Worker:
         #print ("elapsed_time:{0}".format(elapsed_time) + "[sec]")
         buffer_s.append(s)
         buffer_a.append(a)
-        buffer_r.append((r+8)/8)  # normalize reward, find to be useful
-        #buffer_r.append(r)
+        #buffer_r.append((r+8)/8)  # normalize reward, find to be useful
+        buffer_r.append(r)
         s = s_
         ep_r += r
 
@@ -201,13 +207,6 @@ class Worker:
       GLOBAL_EP += 1
       if GLOBAL_EP % MODEL_SAVE_INTERVAL == 0:
         saver.save(sess, MODEL_DIR + "/ppo_model_ep_" + str(GLOBAL_EP) + ".ckpt")
-
-env = gym.make(GAME)
-
-NUM_STATES = env.observation_space.shape[0]
-NUM_ACTIONS = env.action_space.shape[0]
-A_BOUNDS = [env.action_space.low, env.action_space.high]
-NONE_STATE = np.zeros(NUM_STATES)
 
 if __name__=="__main__":
   config = tf.ConfigProto(

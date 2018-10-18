@@ -3,12 +3,15 @@ import numpy as np
 import gym
 from ppo import PPO
 
-GAME = 'Pendulum-v0'
+import myenv
+
+#GAME = 'Pendulum-v0'
+GAME = 'myenv-v2'
 MAX_EP_STEP = 1000
 MAX_EP = 10
 GLOBAL_RUNNING_R = []
 GLOBAL_EP = 0
-NN_MODEL = './models/ppo_model_ep_10000.ckpt'
+NN_MODEL = './models/ppo_model_ep_1900.ckpt'
 env = gym.make(GAME)
 
 def main():
