@@ -27,7 +27,7 @@ GAMMA = 0.97
 BATCH = 64
 EPOCH = 10
 CLIP_EPSILON = 0.2
-NUM_HIDDENS = [512, 512, 512]
+NUM_HIDDENS = [256, 256, 256]
 #LEARNING_RATE = 1e-4
 LEARNING_RATE = 2e-5
 BETA = 1e-4# entropy
@@ -216,14 +216,14 @@ if __name__=="__main__":
   config = tf.ConfigProto(
     log_device_placement=False,
     allow_soft_placement=True,
-    gpu_options=tf.GPUOptions(
-      visible_device_list="0",
-      allow_growth=True
-    )
+    #gpu_options=tf.GPUOptions(
+    #  visible_device_list="0",
+    #  allow_growth=True
+    #)
   )
   sess = tf.Session(config=config)
   #with tf.Session(config=config) as sess:
-  with tf.device("/gpu:0"):
+  with tf.device("/cpu:0"):
     #sess = tf_debug.LocalCLIDebugWrapperSession(sess)
     #sess.add_tensor_filter('has_inf_or_nan', tf_debug.has_inf_or_nan)
 
