@@ -43,7 +43,7 @@ GLOBAL_EP = 0
 NN_MODEL = "/home/amsl/reinforcement_learning/ppo/models/ppo_model_ep_" + str(GLOBAL_EP) + ".ckpt"
 if GLOBAL_EP == 0:
   NN_MODEL = None
-NUM_WORKERS = 1
+NUM_WORKERS = 32
 
 def build_summaries():
   with tf.name_scope("logger"):
@@ -119,7 +119,7 @@ class PPO(object):
       la1 = tf.layers.dense(la0, NUM_HIDDENS[1], tf.nn.relu, kernel_initializer=self.weight_init, name="la1")
       mu = tf.layers.dense(la1, NUM_ACTIONS, tf.nn.tanh, kernel_initializer=self.weight_init, name="mu", trainable=trainable)
       sigma = tf.layers.dense(la1, NUM_ACTIONS, tf.nn.softplus, kernel_initializer=self.weight_init, name="sigma", trainable=trainable)
-      norm_dist = tf.distributions.Normal(loc=mu * A_BOUNDS[1], scale=sigma)
+      norm_dist = tf.distributions.Normal(loc=mu * A_BOUNDS[1], scale=sigma+1e-8)
       #prob = tf.layers.dense(la1, NUM_ACTIONS, tf.nn.softmax, kernel_initializer=self.weight_init, name="prob", trainable=trainable)
       v = tf.layers.dense(la1, 1, kernel_initializer=self.weight_init, name="value")
     params = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=name)
@@ -142,7 +142,7 @@ class PPO(object):
     _feed_dict={self.s_t:s, self.a_t:a, self.tfdc_r:r, self.adv:adv}
     summary_str = self.sess.run(summary_ops, feed_dict={
       summary_vars[0]:r.mean(),
-      summary_vars[1]:self.sess.run(self.entropy, _feed_dict) / BETA,
+      summary_vars[1]:self.sess.run(self.entropy, _feed_dict),
       #summary_vars[2]:self.sess.run(self.learning_rate),
       summary_vars[2]:(self.learning_rate),
       summary_vars[3]:self.sess.run(self.a_loss, _feed_dict),
@@ -183,8 +183,8 @@ class Worker:
         #print ("elapsed_time:{0}".format(elapsed_time) + "[sec]")
         buffer_s.append(s)
         buffer_a.append(a)
-        buffer_r.append((r+8)/8)  # normalize reward, find to be useful
-        #buffer_r.append(r)
+        #buffer_r.append((r+8)/8)  # normalize reward, find to be useful
+        buffer_r.append(r)
         s = s_
         ep_r += r
 
