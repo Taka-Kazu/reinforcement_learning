@@ -23,12 +23,13 @@ NONE_STATE = np.zeros(NUM_STATES)
 
 EP_MAX = 10000
 EP_LEN = 200
-GAMMA = 0.9
+GAMMA = 0.97
 BATCH = 64
-EPOCH = 3
+EPOCH = 10
 CLIP_EPSILON = 0.2
 NUM_HIDDENS = [512, 512, 512]
-LEARNING_RATE = 1e-4
+#LEARNING_RATE = 1e-4
+LEARNING_RATE = 2e-5
 BETA = 1e-4# entropy
 
 # directories
@@ -38,10 +39,11 @@ MODEL_DIR = "./models"
 MODEL_SAVE_INTERVAL = 100
 RENDER_EP = 100
 
-GLOBAL_EP = 6000
-NN_MODEL = None
+GLOBAL_EP = 0
 NN_MODEL = "/home/amsl/reinforcement_learning/ppo/models/ppo_model_ep_" + str(GLOBAL_EP) + ".ckpt"
-NUM_WORKERS = 32
+if GLOBAL_EP == 0:
+  NN_MODEL = None
+NUM_WORKERS = 1
 
 def build_summaries():
   with tf.name_scope("logger"):
@@ -71,21 +73,21 @@ class PPO(object):
     self.s_t = tf.placeholder(tf.float32, shape=(None, NUM_STATES), name='state')
 
     self.global_step = tf.Variable(0., trainable=False)
-    self.learning_rate = tf.train.exponential_decay(LEARNING_RATE, self.global_step, 1000, 0.98, staircase=True)
+    #self.learning_rate = tf.train.exponential_decay(LEARNING_RATE, self.global_step, 1000, 0.98, staircase=True)
+    self.learning_rate = LEARNING_RATE
 
     self.weight_init = tf.random_normal_initializer(0.0, 0.1)
     # common
-    pi, pi_params = self._build_net('pi', trainable=True)
-    oldpi, oldpi_params = self._build_net('oldpi', trainable=False)
+    pi, pi_params, self.v = self._build_net('pi', trainable=True)
+    oldpi, oldpi_params, _ = self._build_net('oldpi', trainable=False)
 
     # critic
     with tf.variable_scope('critic'):
-      lc = tf.layers.dense(self.s_t, NUM_HIDDENS[0], tf.nn.relu, name="lc")
-      self.v = tf.layers.dense(lc, 1, kernel_initializer=self.weight_init, name="value")
+      #lc = tf.layers.dense(self.s_t, NUM_HIDDENS[0], tf.nn.relu, name="lc")
       self.tfdc_r = tf.placeholder(tf.float32, [None, 1], name='discounted_r')
       self.advantage = self.tfdc_r - self.v
       self.c_loss = tf.reduce_mean(tf.square(self.advantage))
-      self.c_train_op = tf.train.AdamOptimizer(self.learning_rate).minimize(self.c_loss, global_step=self.global_step)
+      self.c_train_op = tf.train.AdamOptimizer(self.learning_rate).minimize(self.c_loss)
 
     # actor
     with tf.variable_scope('sample_action'):
@@ -96,7 +98,7 @@ class PPO(object):
     self.adv = tf.placeholder(tf.float32, [None, 1], 'advantage')
     with tf.variable_scope('loss'):
       with tf.variable_scope('entropy'):
-        self.entropy = BETA * tf.reduce_mean(pi.entropy())
+        self.entropy = tf.reduce_mean(pi.entropy())
       with tf.variable_scope('surrogate'):
         # ratio = tf.exp(pi.log_prob(self.a_t) - oldpi.log_prob(self.a_t))
         # ratio = pi.prob(self.a_t) / oldpi.prob(self.a_t)
@@ -105,10 +107,10 @@ class PPO(object):
         surr = ratio * self.adv
       self.a_loss = -tf.reduce_mean(tf.minimum(
         surr,
-        tf.clip_by_value(ratio, 1.-CLIP_EPSILON, 1.+CLIP_EPSILON)*self.adv) - self.entropy)
+        tf.clip_by_value(ratio, 1.-CLIP_EPSILON, 1.+CLIP_EPSILON)*self.adv)) - BETA * self.entropy
 
     with tf.variable_scope('a_train'):
-      self.a_train_op = tf.train.AdamOptimizer(self.learning_rate).minimize(self.a_loss, global_step=self.global_step)
+      self.a_train_op = tf.train.AdamOptimizer(self.learning_rate).minimize(self.a_loss)
 
 
   def _build_net(self, name, trainable):
@@ -119,8 +121,9 @@ class PPO(object):
       sigma = tf.layers.dense(la1, NUM_ACTIONS, tf.nn.softplus, kernel_initializer=self.weight_init, name="sigma", trainable=trainable)
       norm_dist = tf.distributions.Normal(loc=mu * A_BOUNDS[1], scale=sigma)
       #prob = tf.layers.dense(la1, NUM_ACTIONS, tf.nn.softmax, kernel_initializer=self.weight_init, name="prob", trainable=trainable)
+      v = tf.layers.dense(la1, 1, kernel_initializer=self.weight_init, name="value")
     params = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=name)
-    return norm_dist, params
+    return norm_dist, params, v
 
   def update(self, s, a, r):
     self.sess.run(self.update_oldpi_op)
@@ -140,7 +143,8 @@ class PPO(object):
     summary_str = self.sess.run(summary_ops, feed_dict={
       summary_vars[0]:r.mean(),
       summary_vars[1]:self.sess.run(self.entropy, _feed_dict) / BETA,
-      summary_vars[2]:self.sess.run(self.learning_rate),
+      #summary_vars[2]:self.sess.run(self.learning_rate),
+      summary_vars[2]:(self.learning_rate),
       summary_vars[3]:self.sess.run(self.a_loss, _feed_dict),
       summary_vars[4]:self.sess.run(self.c_loss, _feed_dict),
       summary_vars[5]:self.sess.run(self.v, _feed_dict).mean()
@@ -170,8 +174,8 @@ class Worker:
       buffer_s, buffer_a, buffer_r = [], [], []
       ep_r = 0
       for t in range(EP_LEN):    # in one episode
-        if(self.name=="W_0"):
-          self.env.render()
+        #if(self.name=="W_0"):
+        #  self.env.render()
         a = ppo.choose_action(s)
         start_time = time.time()
         s_, r, done, _ = self.env.step(a)
@@ -179,8 +183,8 @@ class Worker:
         #print ("elapsed_time:{0}".format(elapsed_time) + "[sec]")
         buffer_s.append(s)
         buffer_a.append(a)
-        #buffer_r.append((r+8)/8)  # normalize reward, find to be useful
-        buffer_r.append(r)
+        buffer_r.append((r+8)/8)  # normalize reward, find to be useful
+        #buffer_r.append(r)
         s = s_
         ep_r += r
 
