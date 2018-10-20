@@ -13,8 +13,8 @@ from tensorflow.python import debug as tf_debug
 #pyximport.install(inplace=True)
 import myenv
 
-#GAME='Pendulum-v0'
-GAME='myenv-v2'
+GAME='Pendulum-v0'
+#GAME='myenv-v2'
 env = gym.make(GAME)
 NUM_STATES = env.observation_space.shape[0]
 NUM_ACTIONS = env.action_space.shape[0]
@@ -23,14 +23,16 @@ NONE_STATE = np.zeros(NUM_STATES)
 
 EP_MAX = 10000
 EP_LEN = 200
-GAMMA = 0.97
+GAMMA = 0.99
+LAMBDA = 0.95
 BATCH = 64
-EPOCH = 10
+EPOCH = 3
 CLIP_EPSILON = 0.2
 NUM_HIDDENS = [256, 256, 256]
 #LEARNING_RATE = 1e-4
 LEARNING_RATE = 2e-5
 BETA = 1e-4# entropy
+VALUE_FACTOR = 1.0
 
 # directories
 LOG_DIR = "./log"
@@ -59,9 +61,10 @@ def build_summaries():
     tf.summary.scalar("Value_Loss",value_loss)
     value_estimate = tf.Variable(0.)
     tf.summary.scalar("Value_Estimate",value_estimate)
+    loss = tf.Variable(0.)
+    tf.summary.scalar("Loss",loss)
 
-    summary_vars = [reward,entropy,learning_rate,policy_loss,value_loss,value_estimate]
-    #summary_vars = [reward,learning_rate,policy_loss,value_loss,value_estimate]
+    summary_vars = [reward,entropy,learning_rate,policy_loss,value_loss,value_estimate, loss]
     summary_ops = tf.summary.merge_all()
 
   return summary_ops, summary_vars
@@ -85,9 +88,8 @@ class PPO(object):
     with tf.variable_scope('critic'):
       #lc = tf.layers.dense(self.s_t, NUM_HIDDENS[0], tf.nn.relu, name="lc")
       self.tfdc_r = tf.placeholder(tf.float32, [None, 1], name='discounted_r')
-      self.advantage = self.tfdc_r - self.v
-      self.c_loss = tf.reduce_mean(tf.square(self.advantage))
-      self.c_train_op = tf.train.AdamOptimizer(self.learning_rate).minimize(self.c_loss)
+      self.c_loss = tf.reduce_mean(tf.square(self.tfdc_r - self.v))
+      #self.c_train_op = tf.train.AdamOptimizer(self.learning_rate).minimize(self.c_loss)
 
     # actor
     with tf.variable_scope('sample_action'):
@@ -107,10 +109,11 @@ class PPO(object):
         surr = ratio * self.adv
       self.a_loss = -tf.reduce_mean(tf.minimum(
         surr,
-        tf.clip_by_value(ratio, 1.-CLIP_EPSILON, 1.+CLIP_EPSILON)*self.adv)) - BETA * self.entropy
+        tf.clip_by_value(ratio, 1.-CLIP_EPSILON, 1.+CLIP_EPSILON)*self.adv))
+      self.loss = self.a_loss - BETA * self.entropy + self.c_loss * VALUE_FACTOR
 
     with tf.variable_scope('a_train'):
-      self.a_train_op = tf.train.AdamOptimizer(self.learning_rate).minimize(self.a_loss)
+      self.train_op = tf.train.AdamOptimizer(self.learning_rate).minimize(self.loss)
 
 
   def _build_net(self, name, trainable):
@@ -125,19 +128,19 @@ class PPO(object):
     params = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=name)
     return norm_dist, params, v
 
-  def update(self, s, a, r):
+  def update(self, s, a, r, adv):
     self.sess.run(self.update_oldpi_op)
 
-    adv = self.sess.run(self.advantage, {self.s_t: s, self.tfdc_r: r})
-    # adv = (adv - adv.mean())/(adv.std()+1e-6)   # sometimes helpful
+    #for _ in range(EPOCH):
+    #  # update actor
+    #  self.sess.run(self.a_train_op, {self.s_t: s, self.a_t: a, self.adv: adv})
+
+    #for _ in range(EPOCH):
+    #  # update critic
+    #  self.sess.run(self.c_train_op, {self.s_t: s, self.tfdc_r: r})
 
     for _ in range(EPOCH):
-      # update actor
-      self.sess.run(self.a_train_op, {self.s_t: s, self.a_t: a, self.adv: adv})
-
-    for _ in range(EPOCH):
-      # update critic
-      self.sess.run(self.c_train_op, {self.s_t: s, self.tfdc_r: r})
+      self.sess.run(self.train_op, {self.s_t: s, self.a_t: a, self.adv: adv, self.tfdc_r: r})
 
     _feed_dict={self.s_t:s, self.a_t:a, self.tfdc_r:r, self.adv:adv}
     summary_str = self.sess.run(summary_ops, feed_dict={
@@ -147,7 +150,8 @@ class PPO(object):
       summary_vars[2]:(self.learning_rate),
       summary_vars[3]:self.sess.run(self.a_loss, _feed_dict),
       summary_vars[4]:self.sess.run(self.c_loss, _feed_dict),
-      summary_vars[5]:self.sess.run(self.v, _feed_dict).mean()
+      summary_vars[5]:self.sess.run(self.v, _feed_dict).mean(),
+      summary_vars[6]:self.sess.run(self.loss, _feed_dict)
     })
     global GLOBAL_EP
     writer.add_summary(summary_str, global_step=GLOBAL_EP)
@@ -172,6 +176,7 @@ class Worker:
     while not COORD.should_stop():
       s = self.env.reset()
       buffer_s, buffer_a, buffer_r = [], [], []
+      buffer_v = []
       ep_r = 0
       for t in range(EP_LEN):    # in one episode
         #if(self.name=="W_0"):
@@ -183,23 +188,34 @@ class Worker:
         #print ("elapsed_time:{0}".format(elapsed_time) + "[sec]")
         buffer_s.append(s)
         buffer_a.append(a)
-        #buffer_r.append((r+8)/8)  # normalize reward, find to be useful
-        buffer_r.append(r)
+        buffer_r.append((r+8)/8)  # normalize reward, find to be useful
+        #buffer_r.append(r)
+        buffer_v.append(ppo.get_v(s))
         s = s_
         ep_r += r
 
-        # update ppo
+        # calcurate advantage
         if (t+1) % BATCH == 0 or t == EP_LEN-1 or done:
-          v_s_ = ppo.get_v(s_)
-          discounted_r = []
-          for r in buffer_r[::-1]:
-            v_s_ = r + GAMMA * v_s_
-            discounted_r.append(v_s_)
-          discounted_r.reverse()
-
-          bs, ba, br = np.vstack(buffer_s), np.vstack(buffer_a), np.array(discounted_r)[:, np.newaxis]
+          v_s_ = 0
+          if not done:
+            v_s_ = ppo.get_v(s_)
+          buffer_v.append(v_s_)
+          running_adv = 0.0
+          advantage = []
+          len_r = len(buffer_r)
+          for t in reversed(range(len_r)):
+            delta_t = buffer_r[t] + GAMMA * buffer_v[t + 1] - buffer_v[t]
+            running_adv = (GAMMA * LAMBDA) * running_adv + delta_t
+            advantage.append(running_adv)
+          advantage.reverse()
+          adv = np.array(advantage)[:, np.newaxis]
+          buffer_v.pop()
+          # update ppo
+          bs, ba = np.vstack(buffer_s), np.vstack(buffer_a)
+          discounted_r = adv + np.array(buffer_v)[:, np.newaxis]
           buffer_s, buffer_a, buffer_r = [], [], []
-          ppo.update(bs, ba, br)
+          buffer_v = []
+          ppo.update(bs, ba, discounted_r, adv)
 
         if done:
           break;
