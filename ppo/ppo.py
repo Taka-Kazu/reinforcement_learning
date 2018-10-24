@@ -25,8 +25,11 @@ EP_MAX = 10000
 EP_LEN = 200
 GAMMA = 0.99
 LAMBDA = 0.95
-BATCH = 64
-EPOCH = 3
+NUM_WORKERS = 16
+BATCH_SIZE = 512
+EPOCH = 10
+BUFFER_SIZE = BATCH_SIZE * EPOCH
+TIME_HORIZON = BATCH_SIZE * EPOCH
 CLIP_EPSILON = 0.2
 NUM_HIDDENS = [256, 256, 256]
 #LEARNING_RATE = 1e-4
@@ -45,7 +48,6 @@ GLOBAL_EP = 0
 NN_MODEL = "/home/amsl/reinforcement_learning/ppo/models/ppo_model_ep_" + str(GLOBAL_EP) + ".ckpt"
 if GLOBAL_EP == 0:
   NN_MODEL = None
-NUM_WORKERS = 32
 
 def build_summaries():
   with tf.name_scope("logger"):
@@ -112,8 +114,13 @@ class PPO(object):
         tf.clip_by_value(ratio, 1.-CLIP_EPSILON, 1.+CLIP_EPSILON)*self.adv))
       self.loss = self.a_loss - BETA * self.entropy + self.c_loss * VALUE_FACTOR
 
-    with tf.variable_scope('a_train'):
+    with tf.variable_scope('train'):
       self.train_op = tf.train.AdamOptimizer(self.learning_rate).minimize(self.loss)
+
+    self.brain_buffer_s = np.empty((0, NUM_STATES))
+    self.brain_buffer_a = np.empty((0, NUM_ACTIONS))
+    self.brain_buffer_r = np.empty((0, 1))
+    self.brain_buffer_adv = np.empty((0, 1))
 
 
   def _build_net(self, name, trainable):
@@ -128,20 +135,37 @@ class PPO(object):
     params = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=name)
     return norm_dist, params, v
 
-  def update(self, s, a, r, adv):
-    self.sess.run(self.update_oldpi_op)
-
-    #for _ in range(EPOCH):
-    #  # update actor
-    #  self.sess.run(self.a_train_op, {self.s_t: s, self.a_t: a, self.adv: adv})
-
-    #for _ in range(EPOCH):
-    #  # update critic
-    #  self.sess.run(self.c_train_op, {self.s_t: s, self.tfdc_r: r})
-
+  def update(self):
+    #print self.brain_buffer_s.shape
+    #print self.brain_buffer_a.shape
+    #print self.brain_buffer_r.shape
+    #print self.brain_buffer_adv.shape
     for _ in range(EPOCH):
-      self.sess.run(self.train_op, {self.s_t: s, self.a_t: a, self.adv: adv, self.tfdc_r: r})
+      for i in range(len(self.brain_buffer_s) // BATCH_SIZE):
+        start = i * BATCH_SIZE
+        end = (i+1) * BATCH_SIZE
+        self.sess.run(self.update_oldpi_op)
+        self.sess.run(self.train_op, {self.s_t: self.brain_buffer_s, self.a_t: self.brain_buffer_a, self.adv: self.brain_buffer_adv, self.tfdc_r: self.brain_buffer_r})
+    self.brain_buffer_s = np.empty((0, NUM_STATES))
+    self.brain_buffer_a = np.empty((0, NUM_ACTIONS))
+    self.brain_buffer_r = np.empty((0, 1))
+    self.brain_buffer_adv = np.empty((0, 1))
 
+
+  def choose_action(self, s):
+    s = s[np.newaxis, :]
+    a = self.sess.run([self.sample_op], {self.s_t: s})
+    return np.clip(a, A_BOUNDS[0], A_BOUNDS[1]).reshape(-1)
+
+  def get_v(self, s):
+    if s.ndim < 2: s = s[np.newaxis, :]
+    return self.sess.run(self.v, {self.s_t: s})[0, 0]
+
+  def push_buffer(self, s, a, r, adv):
+    self.brain_buffer_s = np.append(self.brain_buffer_s, s, 0)
+    self.brain_buffer_a = np.append(self.brain_buffer_a, a, 0)
+    self.brain_buffer_r = np.append(self.brain_buffer_r, r, 0)
+    self.brain_buffer_adv = np.append(self.brain_buffer_adv, adv, 0)
     _feed_dict={self.s_t:s, self.a_t:a, self.tfdc_r:r, self.adv:adv}
     summary_str = self.sess.run(summary_ops, feed_dict={
       summary_vars[0]:r.mean(),
@@ -157,14 +181,6 @@ class PPO(object):
     writer.add_summary(summary_str, global_step=GLOBAL_EP)
     writer.flush()
 
-  def choose_action(self, s):
-    s = s[np.newaxis, :]
-    a = self.sess.run([self.sample_op], {self.s_t: s})
-    return np.clip(a, A_BOUNDS[0], A_BOUNDS[1]).reshape(-1)
-
-  def get_v(self, s):
-    if s.ndim < 2: s = s[np.newaxis, :]
-    return self.sess.run(self.v, {self.s_t: s})[0, 0]
 
 class Worker:
   def __init__(self, name, brain):
@@ -195,7 +211,7 @@ class Worker:
         ep_r += r
 
         # calcurate advantage
-        if (t+1) % BATCH == 0 or t == EP_LEN-1 or done:
+        if (t+1) % BATCH_SIZE == 0 or t == EP_LEN-1 or done:
           v_s_ = 0
           if not done:
             v_s_ = ppo.get_v(s_)
@@ -210,12 +226,14 @@ class Worker:
           advantage.reverse()
           adv = np.array(advantage)[:, np.newaxis]
           buffer_v.pop()
-          # update ppo
+
           bs, ba = np.vstack(buffer_s), np.vstack(buffer_a)
           discounted_r = adv + np.array(buffer_v)[:, np.newaxis]
           buffer_s, buffer_a, buffer_r = [], [], []
           buffer_v = []
-          ppo.update(bs, ba, discounted_r, adv)
+          ppo.push_buffer(bs, ba, discounted_r, adv)
+        if len(ppo.brain_buffer_s) >= TIME_HORIZON:
+          ppo.update()
 
         if done:
           break;
