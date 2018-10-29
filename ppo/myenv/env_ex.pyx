@@ -255,8 +255,8 @@ class MyEnv(gym.Env):
     elif (not self.is_movable(self.pose)) or self.is_collision(self.pose):
       reward = -1.0
     else:
-      reward = (self.pre_dis-self.dis)*0.005
-    reward += -0.001 * cabs(angle_diff(self.pose[2], atan2(self.target[1] - self.init_pose[1], self.target[0] - self.init_pose[0])))
+      reward = (self.pre_dis-self.dis)*0.05
+      reward += -0.01 * cabs(angle_diff(self.pose[2], atan2(self.target[1] - self.pose[1], self.target[0] - self.pose[0])))
     #if cabs(self.pre_dis-self.dis) < 1e-6:
     #  reward -=0.01
     self.pre_dis = self.dis
