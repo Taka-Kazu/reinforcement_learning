@@ -2,269 +2,320 @@
 
 import tensorflow as tf
 import numpy as np
-import matplotlib.pyplot as plt
 import gym
 import os
-import threading, time
-
-from tensorflow.python import debug as tf_debug
-
-#import pyximport
-#pyximport.install(inplace=True)
-import myenv
-
-GAME='Pendulum-v0'
-#GAME='myenv-v2'
-env = gym.make(GAME)
-NUM_STATES = env.observation_space.shape[0]
-NUM_ACTIONS = env.action_space.shape[0]
-A_BOUNDS = [env.action_space.low, env.action_space.high]
-NONE_STATE = np.zeros(NUM_STATES)
+import scipy.signal
+from gym import wrappers
+from datetime import datetime
+from time import time
+from utils import RunningStats, discount, add_histogram
+OUTPUT_RESULTS_DIR = "./"
 
 EP_MAX = 10000
-EP_LEN = 200
 GAMMA = 0.99
 LAMBDA = 0.95
-BATCH = 64
-EPOCH = 3
-CLIP_EPSILON = 0.2
-NUM_HIDDENS = [256, 256, 256]
-#LEARNING_RATE = 1e-4
-LEARNING_RATE = 2e-5
-BETA = 1e-4# entropy
-VALUE_FACTOR = 1.0
+ENTROPY_BETA = 0.01  # 0.01 for discrete, 0.0 for continuous
+LR = 0.0001
+BATCH = 8192  # 128 for discrete, 8192 for continuous
+MINIBATCH = 32
+EPOCHS = 10
+EPSILON = 0.1
+VF_COEFF = 1.0
+L2_REG = 0.001
+SIGMA_FLOOR = 0.0
 
-# directories
-LOG_DIR = "./log"
-MODEL_DIR = "./models"
-
-MODEL_SAVE_INTERVAL = 100
-RENDER_EP = 100
-
-GLOBAL_EP = 0
-NN_MODEL = "/home/amsl/reinforcement_learning/ppo/models/ppo_model_ep_" + str(GLOBAL_EP) + ".ckpt"
-if GLOBAL_EP == 0:
-  NN_MODEL = None
-NUM_WORKERS = 32
-
-def build_summaries():
-  with tf.name_scope("logger"):
-    reward = tf.Variable(0.)
-    tf.summary.scalar("Reward",reward)
-    entropy = tf.Variable(0.)
-    tf.summary.scalar("Entropy",entropy)
-    learning_rate = tf.Variable(0.)
-    tf.summary.scalar("Learning_Rate",learning_rate)
-    policy_loss = tf.Variable(0.)
-    tf.summary.scalar("Policy_Loss",policy_loss)
-    value_loss = tf.Variable(0.)
-    tf.summary.scalar("Value_Loss",value_loss)
-    value_estimate = tf.Variable(0.)
-    tf.summary.scalar("Value_Estimate",value_estimate)
-    loss = tf.Variable(0.)
-    tf.summary.scalar("Loss",loss)
-
-    summary_vars = [reward,entropy,learning_rate,policy_loss,value_loss,value_estimate, loss]
-    summary_ops = tf.summary.merge_all()
-
-  return summary_ops, summary_vars
+# MODEL_RESTORE_PATH = "/path/to/saved/model"
+MODEL_RESTORE_PATH = None
 
 class PPO(object):
+  def __init__(self, environment, summary_dir="./", gpu=False, greyscale=True):
+    os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+    config = tf.ConfigProto(log_device_placement=False, device_count={'GPU': gpu})
+    config.gpu_options.per_process_gpu_memory_fraction = 0.1
 
-  def __init__(self, sess):
-    self.sess = sess
-    self.s_t = tf.placeholder(tf.float32, shape=(None, NUM_STATES), name='state')
+    if len(environment.action_space.shape) > 0:
+      self.discrete = False
+      self.s_dim, self.a_dim = environment.observation_space.shape, environment.action_space.shape[0]
+      self.a_bound = (environment.action_space.high - environment.action_space.low) / 2
+      self.actions = tf.placeholder(tf.float32, [None, self.a_dim], 'action')
+    else:
+      self.discrete = True
+      self.s_dim, self.a_dim = environment.observation_space.shape, environment.action_space.n
+      self.actions = tf.placeholder(tf.int32, [None, 1], 'action')
+    self.cnn = len(self.s_dim) == 3
+    self.greyscale = greyscale  # If not greyscale and using RGB, make sure to divide the images by 255
 
-    self.global_step = tf.Variable(0., trainable=False)
-    #self.learning_rate = tf.train.exponential_decay(LEARNING_RATE, self.global_step, 1000, 0.98, staircase=True)
-    self.learning_rate = LEARNING_RATE
+    self.sess = tf.Session(config=config)
+    self.state = tf.placeholder(tf.float32, [None] + list(self.s_dim), 'state')
+    self.advantage = tf.placeholder(tf.float32, [None, 1], 'advantage')
+    self.rewards = tf.placeholder(tf.float32, [None, 1], 'discounted_r')
 
-    self.weight_init = tf.random_normal_initializer(0.0, 0.1)
-    # common
-    pi, pi_params, self.v = self._build_net('pi', trainable=True)
-    oldpi, oldpi_params, _ = self._build_net('oldpi', trainable=False)
+    self.dataset = tf.data.Dataset.from_tensor_slices({"state": self.state, "actions": self.actions,
+                               "rewards": self.rewards, "advantage": self.advantage})
+    self.dataset = self.dataset.shuffle(buffer_size=10000)
+    self.dataset = self.dataset.batch(MINIBATCH)
+    self.dataset = self.dataset.cache()
+    self.dataset = self.dataset.repeat(EPOCHS)
+    self.iterator = self.dataset.make_initializable_iterator()
+    batch = self.iterator.get_next()
 
-    # critic
-    with tf.variable_scope('critic'):
-      #lc = tf.layers.dense(self.s_t, NUM_HIDDENS[0], tf.nn.relu, name="lc")
-      self.tfdc_r = tf.placeholder(tf.float32, [None, 1], name='discounted_r')
-      self.c_loss = tf.reduce_mean(tf.square(self.tfdc_r - self.v))
-      #self.c_train_op = tf.train.AdamOptimizer(self.learning_rate).minimize(self.c_loss)
+    pi_old, pi_old_params = self._build_anet(batch["state"], 'oldpi')
+    pi, pi_params = self._build_anet(batch["state"], 'pi')
+    pi_eval, _ = self._build_anet(self.state, 'pi', reuse=True)
 
-    # actor
-    with tf.variable_scope('sample_action'):
-      self.sample_op = tf.squeeze(pi.sample(1), axis=0)   # choosing action
-    with tf.variable_scope('update_oldpi'):
-      self.update_oldpi_op = [oldp.assign(p) for p, oldp in zip(pi_params, oldpi_params)]
-    self.a_t = tf.placeholder(tf.float32, [None, NUM_ACTIONS], 'action')
-    self.adv = tf.placeholder(tf.float32, [None, 1], 'advantage')
+    vf_old, vf_old_params = self._build_cnet(batch["state"], "oldvf")
+    self.v, vf_params = self._build_cnet(batch["state"], "vf")
+    self.vf_eval, _ = self._build_cnet(self.state, 'vf', reuse=True)
+
+    self.sample_op = tf.squeeze(pi_eval.sample(1), axis=0, name="sample_action")
+    self.eval_action = pi_eval.mode()  # Used mode for discrete case. Mode should equal mean in continuous
+    self.global_step = tf.train.get_or_create_global_step()
+    self.saver = tf.train.Saver()
+
     with tf.variable_scope('loss'):
+      epsilon_decay = tf.train.polynomial_decay(EPSILON, self.global_step, 1e5, 0.01, power=0.0)
+
+      with tf.variable_scope('policy'):
+        # Use floor functions for the probabilities to prevent NaNs when prob = 0
+        ratio = tf.maximum(pi.prob(batch["actions"]), 1e-6) / tf.maximum(pi_old.prob(batch["actions"]), 1e-6)
+        ratio = tf.clip_by_value(ratio, 0, 10)
+        surr1 = batch["advantage"] * ratio
+        surr2 = batch["advantage"] * tf.clip_by_value(ratio, 1 - epsilon_decay, 1 + epsilon_decay)
+        loss_pi = -tf.reduce_mean(tf.minimum(surr1, surr2))
+        tf.summary.scalar("loss", loss_pi)
+
+      with tf.variable_scope('value_function'):
+        # Sometimes values clipping helps, sometimes just using raw residuals is better ¯\_(ツ)_/¯
+        clipped_value_estimate = vf_old + tf.clip_by_value(self.v - vf_old, -epsilon_decay, epsilon_decay)
+        loss_vf1 = tf.squared_difference(clipped_value_estimate, batch["rewards"])
+        loss_vf2 = tf.squared_difference(self.v, batch["rewards"])
+        loss_vf = tf.reduce_mean(tf.maximum(loss_vf1, loss_vf2)) * 0.5
+        # loss_vf = tf.reduce_mean(tf.square(self.v - batch["rewards"])) * 0.5
+        tf.summary.scalar("loss", loss_vf)
+
       with tf.variable_scope('entropy'):
-        self.entropy = tf.reduce_mean(pi.entropy())
-      with tf.variable_scope('surrogate'):
-        # ratio = tf.exp(pi.log_prob(self.a_t) - oldpi.log_prob(self.a_t))
-        # ratio = pi.prob(self.a_t) / oldpi.prob(self.a_t)
-        old_prob = oldpi.prob(self.a_t) + 1e-10
-        ratio = pi.prob(self.a_t) / old_prob
-        surr = ratio * self.adv
-      self.a_loss = -tf.reduce_mean(tf.minimum(
-        surr,
-        tf.clip_by_value(ratio, 1.-CLIP_EPSILON, 1.+CLIP_EPSILON)*self.adv))
-      self.loss = self.a_loss - BETA * self.entropy + self.c_loss * VALUE_FACTOR
+        entropy = pi.entropy()
+        pol_entpen = -ENTROPY_BETA * tf.reduce_mean(entropy)
 
-    with tf.variable_scope('a_train'):
-      self.train_op = tf.train.AdamOptimizer(self.learning_rate).minimize(self.loss)
+      loss = loss_pi + loss_vf * VF_COEFF + pol_entpen
+      tf.summary.scalar("total", loss)
+      # tf.summary.scalar("epsilon", epsilon_decay)
 
+    with tf.variable_scope('train'):
+      opt = tf.train.AdamOptimizer(LR)
+      self.train_op = opt.minimize(loss, global_step=self.global_step, var_list=pi_params + vf_params)
 
-  def _build_net(self, name, trainable):
-    with tf.variable_scope(name):
-      la0 = tf.layers.dense(self.s_t, NUM_HIDDENS[0], tf.nn.relu, kernel_initializer=self.weight_init, name="la0")
-      la1 = tf.layers.dense(la0, NUM_HIDDENS[1], tf.nn.relu, kernel_initializer=self.weight_init, name="la1")
-      mu = tf.layers.dense(la1, NUM_ACTIONS, tf.nn.tanh, kernel_initializer=self.weight_init, name="mu", trainable=trainable)
-      sigma = tf.layers.dense(la1, NUM_ACTIONS, tf.nn.softplus, kernel_initializer=self.weight_init, name="sigma", trainable=trainable)
-      norm_dist = tf.distributions.Normal(loc=mu * A_BOUNDS[1], scale=sigma+1e-8)
-      #prob = tf.layers.dense(la1, NUM_ACTIONS, tf.nn.softmax, kernel_initializer=self.weight_init, name="prob", trainable=trainable)
-      v = tf.layers.dense(la1, 1, kernel_initializer=self.weight_init, name="value")
-    params = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=name)
-    return norm_dist, params, v
+      # grads, vs = zip(*opt.compute_gradients(loss, var_list=pi_params + vf_params))
+      # Need to split the two networks so that clip_by_global_norm works properly
+      # pi_grads, pi_vs = grads[:len(pi_params)], vs[:len(pi_params)]
+      # vf_grads, vf_vs = grads[len(pi_params):], vs[len(pi_params):]
+      # pi_grads, _ = tf.clip_by_global_norm(pi_grads, 10.0)
+      # vf_grads, _ = tf.clip_by_global_norm(vf_grads, 10.0)
+      # self.train_op = opt.apply_gradients(zip(pi_grads + vf_grads, pi_vs + vf_vs), global_step=self.global_step)
+
+    with tf.variable_scope('update_old'):
+      self.update_pi_old_op = [oldp.assign(p) for p, oldp in zip(pi_params, pi_old_params)]
+      self.update_vf_old_op = [oldp.assign(p) for p, oldp in zip(vf_params, vf_old_params)]
+
+    self.writer = tf.summary.FileWriter(summary_dir, self.sess.graph)
+    self.sess.run(tf.global_variables_initializer())
+
+    tf.summary.scalar("value", tf.reduce_mean(self.v))
+    tf.summary.scalar("policy_entropy", tf.reduce_mean(entropy))
+    if not self.discrete:
+      tf.summary.scalar("sigma", tf.reduce_mean(pi.stddev()))
+    self.summarise = tf.summary.merge(tf.get_collection(tf.GraphKeys.SUMMARIES))
+
+  def save_model(self, model_path, step=None):
+    save_path = self.saver.save(self.sess, os.path.join(model_path, "model.ckpt"), global_step=step)
+    return save_path
+
+  def restore_model(self, model_path):
+    self.saver.restore(self.sess, os.path.join(model_path, "model.ckpt"))
+    print("Model restored from", model_path)
 
   def update(self, s, a, r, adv):
-    self.sess.run(self.update_oldpi_op)
+    start = time()
+    e_time = []
 
-    #for _ in range(EPOCH):
-    #  # update actor
-    #  self.sess.run(self.a_train_op, {self.s_t: s, self.a_t: a, self.adv: adv})
+    self.sess.run([self.update_pi_old_op, self.update_vf_old_op, self.iterator.initializer],
+            feed_dict={self.state: s, self.actions: a, self.rewards: r, self.advantage: adv})
 
-    #for _ in range(EPOCH):
-    #  # update critic
-    #  self.sess.run(self.c_train_op, {self.s_t: s, self.tfdc_r: r})
+    while True:
+      try:
+        e_start = time()
+        summary, step, _ = self.sess.run([self.summarise, self.global_step, self.train_op])
+        e_time.append(time() - e_start)
+      except tf.errors.OutOfRangeError:
+        break
+    print("Trained in %.3fs. Average %.3fs/batch. Global step %i" % (time() - start, np.mean(e_time), step))
+    return summary
 
-    for _ in range(EPOCH):
-      self.sess.run(self.train_op, {self.s_t: s, self.a_t: a, self.adv: adv, self.tfdc_r: r})
+  def _build_anet(self, state_in, name, reuse=False):
+    w_reg = tf.contrib.layers.l2_regularizer(L2_REG)
 
-    _feed_dict={self.s_t:s, self.a_t:a, self.tfdc_r:r, self.adv:adv}
-    summary_str = self.sess.run(summary_ops, feed_dict={
-      summary_vars[0]:r.mean(),
-      summary_vars[1]:self.sess.run(self.entropy, _feed_dict),
-      #summary_vars[2]:self.sess.run(self.learning_rate),
-      summary_vars[2]:(self.learning_rate),
-      summary_vars[3]:self.sess.run(self.a_loss, _feed_dict),
-      summary_vars[4]:self.sess.run(self.c_loss, _feed_dict),
-      summary_vars[5]:self.sess.run(self.v, _feed_dict).mean(),
-      summary_vars[6]:self.sess.run(self.loss, _feed_dict)
-    })
-    global GLOBAL_EP
-    writer.add_summary(summary_str, global_step=GLOBAL_EP)
-    writer.flush()
+    with tf.variable_scope(name, reuse=reuse):
+      if self.cnn:
+        if self.greyscale:
+          state_in = tf.image.rgb_to_grayscale(state_in)
+        conv1 = tf.layers.conv2d(inputs=state_in, filters=32, kernel_size=8, strides=4, activation=tf.nn.relu)
+        conv2 = tf.layers.conv2d(inputs=conv1, filters=64, kernel_size=4, strides=2, activation=tf.nn.relu)
+        conv3 = tf.layers.conv2d(inputs=conv2, filters=64, kernel_size=3, strides=1, activation=tf.nn.relu)
+        state_in = tf.layers.flatten(conv3)
 
-  def choose_action(self, s):
-    s = s[np.newaxis, :]
-    a = self.sess.run([self.sample_op], {self.s_t: s})
-    return np.clip(a, A_BOUNDS[0], A_BOUNDS[1]).reshape(-1)
+      layer_1 = tf.layers.dense(state_in, 400, tf.nn.relu, kernel_regularizer=w_reg, name="pi_l1")
+      layer_2 = tf.layers.dense(layer_1, 400, tf.nn.relu, kernel_regularizer=w_reg, name="pi_l2")
 
-  def get_v(self, s):
-    if s.ndim < 2: s = s[np.newaxis, :]
-    return self.sess.run(self.v, {self.s_t: s})[0, 0]
+      if self.discrete:
+        a_logits = tf.layers.dense(layer_2, self.a_dim, kernel_regularizer=w_reg, name="pi_logits")
+        dist = tf.distributions.Categorical(logits=a_logits)
+      else:
+        mu = tf.layers.dense(layer_2, self.a_dim, tf.nn.tanh, kernel_regularizer=w_reg, name="pi_mu")
+        log_sigma = tf.get_variable(name="pi_sigma", shape=self.a_dim, initializer=tf.zeros_initializer())
+        dist = tf.distributions.Normal(loc=mu * self.a_bound, scale=tf.maximum(tf.exp(log_sigma), SIGMA_FLOOR))
+    params = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=name)
+    return dist, params
 
-class Worker:
-  def __init__(self, name, brain):
-    self.env = gym.make(GAME)
-    self.name = name
+  def _build_cnet(self, state_in, name, reuse=False):
+    w_reg = tf.contrib.layers.l2_regularizer(L2_REG)
 
-  def run(self):
-    global GLOBAL_EP
-    while not COORD.should_stop():
-      s = self.env.reset()
-      buffer_s, buffer_a, buffer_r = [], [], []
-      buffer_v = []
-      ep_r = 0
-      for t in range(EP_LEN):    # in one episode
-        #if(self.name=="W_0"):
-        #  self.env.render()
-        a = ppo.choose_action(s)
-        start_time = time.time()
-        s_, r, done, _ = self.env.step(a)
-        elapsed_time = time.time() - start_time
-        #print ("elapsed_time:{0}".format(elapsed_time) + "[sec]")
-        buffer_s.append(s)
-        buffer_a.append(a)
-        buffer_r.append((r+8)/8)  # normalize reward, find to be useful
-        #buffer_r.append(r)
-        buffer_v.append(ppo.get_v(s))
-        s = s_
-        ep_r += r
+    with tf.variable_scope(name, reuse=reuse):
+      if self.cnn:
+        if self.greyscale:
+          state_in = tf.image.rgb_to_grayscale(state_in)
+        conv1 = tf.layers.conv2d(inputs=state_in, filters=32, kernel_size=8, strides=4, activation=tf.nn.relu)
+        conv2 = tf.layers.conv2d(inputs=conv1, filters=64, kernel_size=4, strides=2, activation=tf.nn.relu)
+        conv3 = tf.layers.conv2d(inputs=conv2, filters=64, kernel_size=3, strides=1, activation=tf.nn.relu)
+        state_in = tf.layers.flatten(conv3)
 
-        # calcurate advantage
-        if (t+1) % BATCH == 0 or t == EP_LEN-1 or done:
-          v_s_ = 0
-          if not done:
-            v_s_ = ppo.get_v(s_)
-          buffer_v.append(v_s_)
-          running_adv = 0.0
-          advantage = []
-          len_r = len(buffer_r)
-          for t in reversed(range(len_r)):
-            delta_t = buffer_r[t] + GAMMA * buffer_v[t + 1] - buffer_v[t]
-            running_adv = (GAMMA * LAMBDA) * running_adv + delta_t
-            advantage.append(running_adv)
-          advantage.reverse()
-          adv = np.array(advantage)[:, np.newaxis]
-          buffer_v.pop()
-          # update ppo
-          bs, ba = np.vstack(buffer_s), np.vstack(buffer_a)
-          discounted_r = adv + np.array(buffer_v)[:, np.newaxis]
-          buffer_s, buffer_a, buffer_r = [], [], []
-          buffer_v = []
-          ppo.update(bs, ba, discounted_r, adv)
+      l1 = tf.layers.dense(state_in, 400, tf.nn.relu, kernel_regularizer=w_reg, name="vf_l1")
+      l2 = tf.layers.dense(l1, 400, tf.nn.relu, kernel_regularizer=w_reg, name="vf_l2")
+      vf = tf.layers.dense(l2, 1, kernel_regularizer=w_reg, name="vf_output")
 
-        if done:
-          break;
-      print(
-        self.name,
-        '|Ep: %i' % GLOBAL_EP,
-        "|Ep_r: %f" % ep_r
-      )
-      GLOBAL_EP += 1
-      if GLOBAL_EP % MODEL_SAVE_INTERVAL == 0:
-        saver.save(sess, MODEL_DIR + "/ppo_model_ep_" + str(GLOBAL_EP) + ".ckpt")
+    params = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope=name)
+    return vf, params
 
-if __name__=="__main__":
-  config = tf.ConfigProto(
-    log_device_placement=False,
-    allow_soft_placement=True,
-    #gpu_options=tf.GPUOptions(
-    #  visible_device_list="0",
-    #  allow_growth=True
-    #)
-  )
-  sess = tf.Session(config=config)
-  #with tf.Session(config=config) as sess:
-  with tf.device("/cpu:0"):
-    #sess = tf_debug.LocalCLIDebugWrapperSession(sess)
-    #sess.add_tensor_filter('has_inf_or_nan', tf_debug.has_inf_or_nan)
+  def evaluate_state(self, state, stochastic=True):
+    if stochastic:
+      action, value = self.sess.run([self.sample_op, self.vf_eval], {self.state: state[np.newaxis, :]})
+    else:
+      action, value = self.sess.run([self.eval_action, self.vf_eval], {self.state: state[np.newaxis, :]})
+    return action[0], np.squeeze(value)
 
-    ppo = PPO(sess)
-    workers = []
-    for i in range(NUM_WORKERS):
-      worker_name="W_%i" % i
-      workers.append(Worker(worker_name, ppo))
 
-    summary_ops, summary_vars = build_summaries()
-    COORD = tf.train.Coordinator()
-    sess.run(tf.global_variables_initializer())
-    writer = tf.summary.FileWriter(LOG_DIR, sess.graph)
-    saver = tf.train.Saver()
+if __name__ == '__main__':
+  # Discrete environments
+  # ENVIRONMENT = 'CartPole-v1'
 
-    nn_model = NN_MODEL
-    if nn_model is not None:
-      saver.restore(sess, nn_model)
+  # Continuous environments
+  ENVIRONMENT = 'Pendulum-v0'
 
-    worker_threads = []
-    for worker in workers:
-      job = lambda:worker.run()
-      t = threading.Thread(target=job)
-      t.start()
-      worker_threads.append(t)
-    with COORD.stop_on_exception():
-      COORD.join(worker_threads)
+  TIMESTAMP = datetime.now().strftime("%Y%m%d-%H%M%S")
+  SUMMARY_DIR = os.path.join(OUTPUT_RESULTS_DIR, "PPO", ENVIRONMENT, TIMESTAMP)
 
+  env = gym.make(ENVIRONMENT)
+  env = wrappers.Monitor(env, os.path.join(SUMMARY_DIR, ENVIRONMENT), video_callable=None)
+  ppo = PPO(env, SUMMARY_DIR, gpu=True)
+
+  if MODEL_RESTORE_PATH is not None:
+    ppo.restore_model(MODEL_RESTORE_PATH)
+
+  t, terminal = 0, False
+  buffer_s, buffer_a, buffer_r, buffer_v, buffer_terminal = [], [], [], [], []
+  rolling_r = RunningStats()
+
+  for episode in range(EP_MAX + 1):
+
+    s = env.reset()
+    ep_r, ep_t, ep_a = 0, 0, []
+
+    while True:
+      a, v = ppo.evaluate_state(s)
+
+      # Update ppo
+      if t == BATCH:  # or (terminal and t < BATCH):
+        # Normalise rewards
+        rewards = np.array(buffer_r)
+        rolling_r.update(rewards)
+        rewards = np.clip(rewards / rolling_r.std, -10, 10)
+
+        v_final = [v * (1 - terminal)]  # v = 0 if terminal, otherwise use the predicted v
+        values = np.array(buffer_v + v_final)
+        terminals = np.array(buffer_terminal + [terminal])
+
+        # Generalized Advantage Estimation - https://arxiv.org/abs/1506.02438
+        delta = rewards + GAMMA * values[1:] * (1 - terminals[1:]) - values[:-1]
+        advantage = discount(delta, GAMMA * LAMBDA, terminals)
+        returns = advantage + np.array(buffer_v)
+        advantage = (advantage - advantage.mean()) / np.maximum(advantage.std(), 1e-6)
+
+        bs, ba, br, badv = np.reshape(buffer_s, (t,) + ppo.s_dim), np.vstack(buffer_a), \
+                   np.vstack(returns), np.vstack(advantage)
+
+        graph_summary = ppo.update(bs, ba, br, badv)
+        buffer_s, buffer_a, buffer_r, buffer_v, buffer_terminal = [], [], [], [], []
+        t = 0
+
+      buffer_s.append(s)
+      buffer_a.append(a)
+      buffer_v.append(v)
+      buffer_terminal.append(terminal)
+      ep_a.append(a)
+
+      if not ppo.discrete:
+        a = np.clip(a, env.action_space.low, env.action_space.high)
+      s, r, terminal, _ = env.step(a)
+      buffer_r.append(r)
+
+      ep_r += r
+      ep_t += 1
+      t += 1
+
+      if terminal:
+        print('Episode: %i' % episode, "| Reward: %.2f" % ep_r, '| Steps: %i' % ep_t)
+
+        # End of episode summary
+        worker_summary = tf.Summary()
+        worker_summary.value.add(tag="Reward", simple_value=ep_r)
+
+        # Create Action histograms for each dimension
+        actions = np.array(ep_a)
+        if ppo.discrete:
+          add_histogram(ppo.writer, "Action", actions, episode, bins=ppo.a_dim)
+        else:
+          for a in range(ppo.a_dim):
+            add_histogram(ppo.writer, "Action/Dim" + str(a), actions[:, a], episode)
+
+        try:
+          ppo.writer.add_summary(graph_summary, episode)
+        except NameError:
+          pass
+        ppo.writer.add_summary(worker_summary, episode)
+        ppo.writer.flush()
+
+        # Save the model
+        if episode % 100 == 0 and episode > 0:
+          path = ppo.save_model(SUMMARY_DIR, episode)
+          print('Saved model at episode', episode, 'in', path)
+
+        break
+
+  env.close()
+
+  # Run trained policy
+  env = gym.make(ENVIRONMENT)
+  env = wrappers.Monitor(env, os.path.join(SUMMARY_DIR, ENVIRONMENT + "_trained"), video_callable=None)
+  while True:
+    s = env.reset()
+    ep_r, ep_t = 0, 0
+    while True:
+      #env.render()
+      a, v = ppo.evaluate_state(s, stochastic=False)
+      if not ppo.discrete:
+        a = np.clip(a, env.action_space.low, env.action_space.high)
+      s, r, terminal, _ = env.step(a)
+      ep_r += r
+      ep_t += 1
+      if terminal:
+        print("Reward: %.2f" % ep_r, '| Steps: %i' % ep_t)
+        break
