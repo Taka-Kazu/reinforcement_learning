@@ -5,12 +5,12 @@ from ppo import PPO
 
 import myenv
 
-GAME = 'Pendulum-v0'
-#GAME = 'myenv-v2'
+#GAME = 'Pendulum-v0'
+GAME = 'myenv-v2'
 MAX_EP_STEP = 1000
 MAX_EP = 10
 GLOBAL_RUNNING_R = []
-GLOBAL_EP = 0
+GLOBAL_EP = 543500
 NN_MODEL = './models/ppo_model_ep_' + str(GLOBAL_EP) + '.ckpt'
 env = gym.make(GAME)
 
